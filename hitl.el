@@ -5,13 +5,13 @@
 ;; Version: 0.1.0
 ;; Package-Requires: ((emacs "29.1"))
 ;; Keywords: tools, convenience, agent, ai
-;; URL: https://github.com/tychoish/hitl.el
+;; URL: https://github.com/tychoish/hitl
 
 ;; This file is not part of GNU Emacs.
 
 ;;; Commentary:
 
-;; hitl.el is a universal, package-agnostic Human-in-the-Loop engine for Emacs.
+;; hitl is a universal, package-agnostic Human-in-the-Loop engine for Emacs.
 ;; It provides structured questioning, approval gates, cursor-driven queue
 ;; polling for external processes, and rich interactive completion widgets.
 ;; Any AI agent or autonomous tool can use Emacs as a human approval barrier

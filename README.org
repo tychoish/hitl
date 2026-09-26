@@ -1,10 +1,10 @@
-#+TITLE: hitl.el — Human-in-the-Loop Interaction Engine for Emacs
+#+TITLE: hitl — Human-in-the-Loop Interaction Engine for Emacs
 #+AUTHOR: tycho garen
 #+LANGUAGE: en
 
 * Overview
 
-~hitl.el~ is a standalone, display-agnostic Human-in-the-Loop (HITL) interaction
+~hitl~ is a standalone, display-agnostic Human-in-the-Loop (HITL) interaction
 and question management engine for Emacs. It decouples asking human users
 structured, interactive questions from any particular agent framework, queue,
 or protocol.
