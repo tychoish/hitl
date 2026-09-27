@@ -48,6 +48,23 @@ or protocol.
 (hitl-view-questions)
 #+END_SRC
 
+* Model Context Protocol (MCP) Integration
+
+~hitl-mcp~ exposes the question queue to external AI agents (Claude Code, Antigravity, custom agents) over MCP via [[https://github.com/tychoish/mcpkit.el][mcpkit]]:
+
+#+BEGIN_SRC elisp
+(require 'hitl-mcp)
+(mcpkit-start-service 'hitl :port 8766)
+#+END_SRC
+
+** MCP Tools
+- ~ask_user~: Post a question and receive a unique question ID.
+- ~poll_question~: Poll question resolution and user answer.
+- ~get_next_question~: Iterative cursor-based question polling.
+- ~list_pending_questions~: Enumerate pending questions awaiting human response.
+- ~cancel_question~: Abort a pending question.
+- ~answer_question~: Submit an answer to a pending question.
+
 * License
 
 GPL-3.0-or-later
