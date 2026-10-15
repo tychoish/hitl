@@ -13,7 +13,7 @@
   "Test that `hitl-mcp-service' is defined and has tools at load time."
   (should (mcpkit-service-p hitl-mcp-service))
   (should (eq (mcpkit-service-name hitl-mcp-service) 'hitl))
-  (should (= (mcpkit-service-port hitl-mcp-service) 8766))
+  (should (= (mcpkit-service-port hitl-mcp-service) 8765))
   (should (>= (hash-table-count (mcpkit-service-tools hitl-mcp-service)) 6)))
 
 (ert-deftest test-hitl-mcp/registration ()

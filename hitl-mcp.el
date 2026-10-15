@@ -3,7 +3,7 @@
 ;; Author: sam kleinman <sam@tychoish.com>
 ;; Maintainer: sam kleinman <sam@tychoish.com>
 ;; Version: 0.1.0
-;; Package-Requires: ((emacs "29.1") (mcpkit "0.1.0") (hitl "0.1.0"))
+;; Package-Requires: ((emacs "29.1") (mcpkit "0.1.0"))
 ;; Keywords: tools, mcp, hitl, agent, ai
 ;; URL: https://github.com/tychoish/hitl
 
@@ -33,19 +33,15 @@
   :group 'hitl
   :prefix "hitl-mcp-")
 
-(defcustom hitl-mcp-port 8766
-  "Default TCP port for the HITL MCP service."
-  :type 'integer
-  :group 'hitl-mcp)
-
 ;;; Service Definition & Top-Level Tool Registration
 
 (defvar hitl-mcp-service
   (or (mcpkit-get-service 'hitl)
       (mcpkit-define-service 'hitl
-        :port hitl-mcp-port
         :description "Human-in-the-Loop Question and Approval Queue"))
   "The HITL `mcpkit-service' instance.")
+
+(mcpkit-register-autostart 'hitl :on-collision 'namespace)
 
 ;; 1. ask_user
 (mcpkit-register-tool 'ask_user 'hitl
