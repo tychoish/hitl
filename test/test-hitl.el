@@ -149,7 +149,8 @@
   (hitl-test/isolate
    (hitl-ask :prompt "Prompt 1" :id "ui-1")
    (hitl-ask :prompt "Prompt 2" :id "ui-2")
-   (hitl-list)
+   (should (commandp 'hitl-view-questions))
+   (hitl-view-questions)
    (let ((buf (get-buffer "*hitl-questions*")))
      (should buf)
      (with-current-buffer buf
