@@ -229,6 +229,8 @@ Returns the updated `hitl-question' struct."
 (require 'hitl-prompt)
 (require 'hitl-cursor)
 (require 'hitl-ui)
+(require 'hitl-plan)
+(require 'hitl-plan-ui)
 
 (provide 'hitl)
 ;;; hitl.el ends here
