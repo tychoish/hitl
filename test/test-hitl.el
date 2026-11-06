@@ -11,6 +11,8 @@
 (require 'ert)
 (require 'cl-lib)
 (require 'hitl)
+(require 'hitl-plan)
+(require 'hitl-ui)
 
 (defmacro hitl-test/isolate (&rest body)
   "Execute BODY with an isolated HITL store and cursor state."
@@ -168,6 +170,62 @@
    (hitl-answer "ind-1" "ok")
    (should (equal hitl--indicator-string ""))
    (hitl-indicator-mode -1)))
+
+;;; Plan counts in the indicator
+
+(defmacro hitl-test/with-plans (&rest body)
+  "Run BODY with an isolated plan store holding one draft and one paused plan."
+  `(let* ((dir (make-temp-file "hitl-indicator-test" t))
+          (hitl-plan-directory dir)
+          (hitl-plan--store (make-hash-table :test #'equal)))
+     (unwind-protect
+         (progn
+           (hitl-plan-create :targets '((:file "/x")) :ops '(noop))
+           (hitl-plan-create :targets '((:file "/y")) :ops '(noop) :status 'paused)
+           (hitl-plan-create :targets '((:file "/z")) :ops '(noop) :status 'complete)
+           ,@body)
+       (delete-directory dir t))))
+
+(defun hitl-test/indicator-click ()
+  "Return the command bound to mouse-1 on the indicator string."
+  (lookup-key (get-text-property 1 'local-map hitl--indicator-string)
+              [mode-line mouse-1]))
+
+(ert-deftest hitl-test/indicator-plans-off-by-default ()
+  (should-not (default-value 'hitl-indicator-include-plans))
+  (hitl-test/isolate
+   (hitl-test/with-plans
+    (let ((hitl-indicator-include-plans nil))
+      (hitl--update-indicator)
+      (should (equal "" hitl--indicator-string))
+      (should (= 0 (hitl--indicator-plan-count)))))))
+
+(ert-deftest hitl-test/indicator-plans-only ()
+  "Only draft and paused plans count; the lighter shows just P:n."
+  (hitl-test/isolate
+   (hitl-test/with-plans
+    (let ((hitl-indicator-include-plans t))
+      (hitl--update-indicator)
+      (should (equal " HITL[P:2]" (substring-no-properties hitl--indicator-string)))
+      (should (eq 'hitl-plan-resume (hitl-test/indicator-click)))))))
+
+(ert-deftest hitl-test/indicator-questions-and-plans ()
+  (hitl-test/isolate
+   (hitl-test/with-plans
+    (let ((hitl-indicator-include-plans t))
+      (hitl-ask :prompt "Q" :id "ind-2")
+      (hitl--update-indicator)
+      (should (equal " HITL[1 P:2]" (substring-no-properties hitl--indicator-string)))
+      ;; With questions pending, the click still opens the question list.
+      (should (eq 'hitl-list (hitl-test/indicator-click)))))))
+
+(ert-deftest hitl-test/indicator-questions-only-unchanged ()
+  (hitl-test/isolate
+   (let ((hitl-indicator-include-plans nil))
+     (hitl-ask :prompt "Q" :id "ind-3")
+     (hitl--update-indicator)
+     (should (equal " HITL[1]" (substring-no-properties hitl--indicator-string)))
+     (should (eq 'hitl-list (hitl-test/indicator-click))))))
 
 (provide 'test-hitl)
 ;;; test-hitl.el ends here

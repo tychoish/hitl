@@ -28,10 +28,17 @@
 (declare-function hitl-question-kind "hitl")
 (declare-function hitl-question-status "hitl")
 (declare-function hitl-question-target "hitl")
+(declare-function hitl-plan-list "hitl-plan")
+(declare-function hitl-plan-resume "hitl-plan-ui")
 
 (defgroup hitl-ui nil
   "User interface components for HITL."
   :group 'hitl)
+
+(defcustom hitl-indicator-include-plans nil
+  "When non-nil, `hitl-indicator-mode' also counts draft and paused plans."
+  :type 'boolean
+  :group 'hitl-ui)
 
 (defface hitl-pending-face
   '((t :foreground "orange" :weight bold))
@@ -131,17 +138,31 @@
 (defvar hitl--indicator-string ""
   "Modeline string indicating pending HITL questions.")
 
+(defun hitl--indicator-plan-count ()
+  "Return the number of draft or paused plans, or 0 when not enabled."
+  (if (and hitl-indicator-include-plans (fboundp 'hitl-plan-list))
+      (length (hitl-plan-list '(draft paused)))
+    0))
+
 (defun hitl--update-indicator (&rest _args)
-  "Update `hitl--indicator-string' based on pending question count."
-  (let ((count (length (hitl-list-pending))))
+  "Update `hitl--indicator-string' from pending questions and (optionally) plans."
+  (let ((count (length (hitl-list-pending)))
+        (plans (hitl--indicator-plan-count)))
     (setq hitl--indicator-string
-          (if (> count 0)
-              (propertize (format " HITL[%d]" count)
+          (if (> (+ count plans) 0)
+              (propertize (concat " HITL["
+                                  (string-join
+                                   (delq nil (list (and (or (> count 0) (zerop plans))
+                                                        (format "%d" count))
+                                                   (and (> plans 0) (format "P:%d" plans))))
+                                   " ")
+                                  "]")
                           'face 'hitl-pending-face
                           'help-echo "Click to view pending HITL questions"
                           'mouse-face 'mode-line-highlight
                           'local-map (let ((map (make-sparse-keymap)))
-                                       (define-key map [mode-line mouse-1] #'hitl-list)
+                                       (define-key map [mode-line mouse-1]
+                                                   (if (> count 0) #'hitl-list #'hitl-plan-resume))
                                        map))
             ""))
     (force-mode-line-update t)))
