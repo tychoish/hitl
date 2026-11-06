@@ -155,6 +155,9 @@
     (mcpkit-register-service hitl-mcp-service))
   hitl-mcp-service)
 
+;; Plan tools (plan_create, plan_execute, ...) register on the same service.
+(require 'hitl-plan-mcp)
+
 ;; Backward compatibility alias for legacy mcpkit-ask
 (defalias 'mcpkit-register-ask-tools #'hitl-mcp-register)
 
