@@ -101,6 +101,42 @@
                               (car (hitl-plan-steps
                                     (hitl-plan-load (hitl-plan-id plan)))))))))))
 
+(ert-deftest hitl-plan-ui-test-bulk-selection ()
+  (hitl-plan-ui-test--with-env
+    (let* ((plan (hitl-plan-ui-test--plan))
+           (steps (hitl-plan-steps plan)))
+      (setf (hitl-plan-step-status (nth 2 steps)) 'done)
+      (with-current-buffer (hitl-plan-review plan nil)
+        (should (string-match-p "\\[x\\]" (buffer-string)))
+        (hitl-plan-ui-skip-all)
+        (should (equal (mapcar #'hitl-plan-step-status steps) '(skipped skipped done)))
+        (should (string-match-p "\\[ \\]" (buffer-string)))
+        (hitl-plan-ui-test--goto-step 1)
+        (hitl-plan-ui-toggle-skip)
+        (should (equal (mapcar #'hitl-plan-step-status steps) '(pending skipped done)))
+        (hitl-plan-ui-select-all)
+        (should (equal (mapcar #'hitl-plan-step-status steps) '(pending pending done)))
+        (should (equal (mapcar #'hitl-plan-step-status
+                               (hitl-plan-steps (hitl-plan-load (hitl-plan-id plan))))
+                       '(pending pending done)))))))
+
+(ert-deftest hitl-plan-ui-test-reselect-completed-plan ()
+  (hitl-plan-ui-test--with-env
+    (dolist (command '(hitl-plan-ui-toggle-skip hitl-plan-ui-select-all))
+      (let* ((plan (hitl-plan-ui-test--plan 'complete))
+             (steps (hitl-plan-steps plan)))
+        (dolist (step steps)
+          (setf (hitl-plan-step-status step) 'done))
+        (setf (hitl-plan-step-status (car steps)) 'skipped)
+        (with-current-buffer (hitl-plan-review plan nil)
+          (hitl-plan-ui-test--goto-step 1)
+          (funcall command)
+          (should (eq 'paused (hitl-plan-status plan)))
+          (should (eq 'paused (hitl-plan-status (hitl-plan-load (hitl-plan-id plan)))))
+          (hitl-plan-ui-execute)
+          (should (eq 'done (hitl-plan-step-status (car steps))))
+          (should (eq 'complete (hitl-plan-status plan))))))))
+
 (ert-deftest hitl-plan-ui-test-add-op ()
   (hitl-plan-ui-test--with-env
     (let* ((plan (hitl-plan-ui-test--plan))
@@ -373,7 +409,7 @@
            (step (car (hitl-plan-steps plan))))
       ;; Single-op: no op column.
       (let ((line (hitl-plan-ui--format-step plan step nil)))
-        (should (string-match-p "\\`  +1 \\[pending\\] a.org +Alpha\n\\'" line))
+        (should (string-match-p "\\`\\[x\\]  +1 \\[pending\\] a.org +Alpha\n\\'" line))
         (should (eq step (get-text-property 0 'hitl-plan-step line))))
       ;; Multi-op: a 14 column op description, truncated.
       (hitl-plan-register-op 'stub 'a-very-long-operation-name :apply #'ignore)

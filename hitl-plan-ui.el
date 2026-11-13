@@ -172,7 +172,13 @@ defaults to `hitl-plan-ui-max-field-width'; longer text ends in an ellipsis."
                                                    ?\s)))
                        (cdr cols))))
     (propertize
-     (concat "  " (propertize body 'face face)
+     (concat (propertize (pcase status
+                           ('pending "[x] ")
+                           ('skipped "[ ] ")
+                           ('done "[✓] ")
+                           (_ "[!] "))
+                         'face face)
+             (propertize body 'face face)
              (if msg (concat " — " (propertize (hitl-plan-ui-clean-string msg) 'face (if (memq status '(failed missing))
                                                              'hitl-plan-failed-face
                                                            'shadow)))
@@ -230,8 +236,16 @@ defaults to `hitl-plan-ui-max-field-width'; longer text ends in an ellipsis."
                      (mapconcat (lambda (c) (format ", %d %s" (cdr c)
                                                     (hitl-plan-ui-clean-string (car c) 40)))
                                 (hitl-plan-other-counts plan) ""))))
-    (insert "\nKeys: [C-c C-c/c/x] execute  [m/u] skip/unskip  [a] add op  [n] note  \
+    (insert (propertize "\nKeys: " 'face 'bold)
+            (propertize "[C-c C-c/c/x]" 'face 'font-lock-keyword-face)
+            " execute  " (propertize "[m/u]" 'face 'font-lock-keyword-face)
+            " toggle  " (propertize "[S/A]" 'face 'font-lock-keyword-face)
+            " skip/select all  [a] add op  [n] note  \
 [L] log-notes  [RET] visit  [g] refresh  [d/k] discard  [q] quit\n\n")
+    (save-excursion
+      (goto-char (point-min))
+      (while (re-search-forward "^[[:alpha:]-]+:" nil t)
+        (add-face-text-property (match-beginning 0) (match-end 0) 'bold)))
     (let ((first-step (point)))
       (dolist (step (hitl-plan-steps plan))
         (let ((start (point)))
@@ -383,6 +397,13 @@ A plan created over MCP first needs an explicit `yes-or-no-p' approval."
              (hitl-plan-ui-clean-string (hitl-plan-id plan) 60) (hitl-plan-status plan)
              (hitl-plan-ui--count plan 'done) (hitl-plan-ui--count plan 'failed))))
 
+(defun hitl-plan-ui--reopen-if-pending (plan)
+  "Reopen a complete PLAN when it has pending steps."
+  (when (and (eq (hitl-plan-status plan) 'complete)
+             (seq-some (lambda (step) (eq (hitl-plan-step-status step) 'pending))
+                       (hitl-plan-steps plan)))
+    (setf (hitl-plan-status plan) 'paused)))
+
 (defun hitl-plan-ui-toggle-skip ()
   "Toggle the step at point between pending and skipped."
   (interactive)
@@ -394,9 +415,33 @@ A plan created over MCP first needs an explicit `yes-or-no-p' approval."
       ('skipped (setf (hitl-plan-step-status step) 'pending
                       (hitl-plan-step-message step) nil))
       (st (user-error "Cannot toggle step with status `%s'" st)))
+    (hitl-plan-ui--reopen-if-pending plan)
     (hitl-plan-save plan)
     (hitl-plan-ui--render plan)
     (forward-line 1)))
+
+(defun hitl-plan-ui--set-all-selection (selected)
+  "Set all pending or skipped steps to SELECTED and save the plan."
+  (let ((plan (hitl-plan-ui--plan)))
+    (seq-do (lambda (step)
+              (when (eq (hitl-plan-step-status step)
+                        (if selected 'skipped 'pending))
+                (setf (hitl-plan-step-status step) (if selected 'pending 'skipped)
+                      (hitl-plan-step-message step) (unless selected "skipped by user"))))
+            (hitl-plan-steps plan))
+    (hitl-plan-ui--reopen-if-pending plan)
+    (hitl-plan-save plan)
+    (hitl-plan-ui--render plan)))
+
+(defun hitl-plan-ui-skip-all ()
+  "Skip all pending steps in the current plan."
+  (interactive)
+  (hitl-plan-ui--set-all-selection nil))
+
+(defun hitl-plan-ui-select-all ()
+  "Select all skipped steps in the current plan."
+  (interactive)
+  (hitl-plan-ui--set-all-selection t))
 
 (defun hitl-plan-ui-add-op ()
   "Prompt for a registered operation and add it to the current plan."
@@ -515,6 +560,8 @@ For callers (such as the MCP tools) that change PLAN outside the buffer."
   "x"       #'hitl-plan-ui-execute
   "m"       #'hitl-plan-ui-toggle-skip
   "u"       #'hitl-plan-ui-toggle-skip
+  "S"       #'hitl-plan-ui-skip-all
+  "A"       #'hitl-plan-ui-select-all
   "a"       #'hitl-plan-ui-add-op
   "n"       #'hitl-plan-ui-edit-note
   "L"       #'hitl-plan-ui-cycle-log-notes
