@@ -240,6 +240,50 @@
             (should (equal "bad arg" (hitl-plan-step-message (cadr (hitl-plan-steps plan))))))
         (delete-file f)))))
 
+(ert-deftest hitl-plan-test-execute-one-hand-crank ()
+  (hitl-plan-test--with-env
+    (hitl-plan-test--register-upcase)
+    (let* ((f (hitl-plan-test--file "alpha\nbeta\ngamma\n"))
+           (plan (hitl-plan-create :targets (hitl-plan-test--targets f "alpha" "beta" "gamma")
+                                   :ops '(mark))))
+      (unwind-protect
+          (progn
+            (hitl-plan-execute-one plan)
+            (should (equal '("x@alpha") (reverse hitl-plan-test--log)))
+            (should (eq 'paused (hitl-plan-status plan)))
+            (should (equal '(done pending pending)
+                           (mapcar #'hitl-plan-step-status (hitl-plan-steps plan))))
+            ;; Persisted as ordinary paused state.
+            (clrhash hitl-plan--store)
+            (should (eq 'paused (hitl-plan-status (hitl-plan-get (hitl-plan-id plan)))))
+            (hitl-plan-execute-one plan)
+            (should (equal '("x@alpha" "x@beta") (reverse hitl-plan-test--log)))
+            ;; Resume runs the remainder and completes.
+            (hitl-plan-execute plan)
+            (should (equal '("x@alpha" "x@beta" "x@gamma") (reverse hitl-plan-test--log)))
+            (should (eq 'complete (hitl-plan-status plan)))
+            (should-error (hitl-plan-execute-one plan) :type 'user-error))
+        (delete-file f)))))
+
+(ert-deftest hitl-plan-test-execute-limit-spans-ops-and-driver ()
+  (hitl-plan-test--with-env
+    (let (seen)
+      (hitl-plan-register-op 'drv 'a :apply #'ignore)
+      (hitl-plan-register-op 'drv 'b :apply #'ignore)
+      (hitl-plan-register-domain 'drv
+        :resolve-target #'identity
+        :driver (lambda (plan op steps resolved)
+                  (seq-do (lambda (s)
+                            (push (hitl-plan-op-name op) seen)
+                            (hitl-plan-run-step plan s op (cdr (assq s resolved))))
+                          steps)))
+      (let ((plan (hitl-plan-create :domain 'drv :targets '(t1 t2) :ops '(a b))))
+        (hitl-plan-execute plan nil 3)
+        (should (equal '(a a b) (reverse seen)))
+        (should (eq 'paused (hitl-plan-status plan)))
+        (should (= 1 (length (seq-filter (lambda (s) (eq 'pending (hitl-plan-step-status s)))
+                                         (hitl-plan-steps plan)))))))))
+
 (ert-deftest hitl-plan-test-skipped-steps-not-run ()
   (hitl-plan-test--with-env
     (hitl-plan-test--register-upcase)

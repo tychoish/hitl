@@ -238,7 +238,8 @@ defaults to `hitl-plan-ui-max-field-width'; longer text ends in an ellipsis."
                                 (hitl-plan-other-counts plan) ""))))
     (insert (propertize "\nKeys: " 'face 'bold)
             (propertize "[C-c C-c/c/x]" 'face 'font-lock-keyword-face)
-            " execute  " (propertize "[m/u]" 'face 'font-lock-keyword-face)
+            " execute  " (propertize "[o]" 'face 'font-lock-keyword-face)
+            " one step  " (propertize "[m/u]" 'face 'font-lock-keyword-face)
             " toggle  " (propertize "[S/A]" 'face 'font-lock-keyword-face)
             " skip/select all  [a] add op  [n] note  \
 [L] log-notes  [RET] visit  [g] refresh  [d/k] discard  [q] quit\n\n")
@@ -396,6 +397,21 @@ A plan created over MCP first needs an explicit `yes-or-no-p' approval."
     (message "Plan %s [%s]: %d done, %d failed"
              (hitl-plan-ui-clean-string (hitl-plan-id plan) 60) (hitl-plan-status plan)
              (hitl-plan-ui--count plan 'done) (hitl-plan-ui--count plan 'failed))))
+
+(defun hitl-plan-ui-execute-one ()
+  "Execute exactly one pending step of the current plan, then stay paused.
+Same MCP approval as `hitl-plan-ui-execute'; per-step notes are not
+prompted for (set them beforehand with \\[hitl-plan-ui-edit-note])."
+  (interactive)
+  (let ((plan (hitl-plan-ui--plan)))
+    (hitl-plan-ui--confirm-mcp-plan plan)
+    (unwind-protect (hitl-plan-execute-one plan)
+      (when (buffer-live-p (current-buffer))
+        (hitl-plan-ui--render plan))
+      (hitl-plan-ui--update-indicator))
+    (message "Plan %s [%s]: %d done, %d pending"
+             (hitl-plan-ui-clean-string (hitl-plan-id plan) 60) (hitl-plan-status plan)
+             (hitl-plan-ui--count plan 'done) (hitl-plan-ui--count plan 'pending))))
 
 (defun hitl-plan-ui--reopen-if-pending (plan)
   "Reopen a complete PLAN when it has pending steps."
@@ -558,6 +574,7 @@ For callers (such as the MCP tools) that change PLAN outside the buffer."
   "C-c C-c" #'hitl-plan-ui-execute
   "c"       #'hitl-plan-ui-execute
   "x"       #'hitl-plan-ui-execute
+  "o"       #'hitl-plan-ui-execute-one
   "m"       #'hitl-plan-ui-toggle-skip
   "u"       #'hitl-plan-ui-toggle-skip
   "S"       #'hitl-plan-ui-skip-all

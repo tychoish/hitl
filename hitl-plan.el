@@ -995,14 +995,17 @@ BEFORE-DONE is the list of steps already done before this execution."
           (error (message "hitl-plan: after-apply hook failed for %s: %s"
                           file (error-message-string err))))))))
 
-(defun hitl-plan--run-op (plan op domain)
+(defun hitl-plan--run-op (plan op domain &optional limit)
   "Run pending steps of OP in PLAN via DOMAIN.  Return non-nil if quit.
+When LIMIT is a positive integer, run at most that many steps.
 A quit inside the domain driver is absorbed (and returned as non-nil); one
 inside the batch rebuild propagates to `hitl-plan-execute'."
   (let ((driver (and domain (hitl-plan-domain-driver domain))))
     (if driver
         (let* ((batch (hitl-plan-rebuild-batch plan op))
-               (resolved (cdr batch))
+               (resolved (if limit
+                             (seq-take (cdr batch) limit)
+                           (cdr batch)))
                (quitted nil))
           (hitl-plan-save plan)
           (when resolved
@@ -1016,16 +1019,21 @@ inside the batch rebuild propagates to `hitl-plan-execute'."
       ;; Keep `inhibit-quit' bound across the loop so a C-g arriving during
       ;; a step is observed here, between steps, rather than signalled.
       (let ((quitted nil)
+            (ran 0)
             (inhibit-quit t))
         (dolist (step (hitl-plan--pending-steps plan op))
-          (unless quitted
+          (unless (or quitted (and limit (>= ran limit)))
             (hitl-plan-run-step plan step op)
+            (setq ran (1+ ran))
             (when quit-flag
               (setq quit-flag nil quitted t))))
         quitted))))
 
-(defun hitl-plan-execute (plan &optional only-op)
+(defun hitl-plan-execute (plan &optional only-op limit)
   "Execute pending steps of PLAN (or only those of ONLY-OP), return PLAN.
+When LIMIT is a positive integer, stop once that many pending steps have
+been attempted (unresolvable steps count) and leave the plan `paused'
+with the rest still pending, so it can be stepped by hand and resumed.
 Operations run in `hitl-plan-order-ops' order.  If the plan's domain has a
 :driver, it is called per operation with (PLAN OP PENDING-STEPS
 RESOLVED-ALIST) and must call `hitl-plan-run-step' for each target;
@@ -1047,7 +1055,12 @@ not run."
          (ops (if only-op
                   (list only-op)
                 (hitl-plan-order-ops (hitl-plan-domain plan) (hitl-plan-ops plan))))
-         (quitted nil))
+         (quitted nil)
+         (pending-count (lambda ()
+                          (length (seq-filter
+                                   (lambda (s) (eq (hitl-plan-step-status s) 'pending))
+                                   (hitl-plan-steps plan)))))
+         (pending-before (funcall pending-count)))
     (setf (hitl-plan-status plan) 'running)
     (hitl-plan-save plan)
     ;; An error from a driver or batch rebuild, or a quit during the rebuild
@@ -1055,8 +1068,10 @@ not run."
     ;; leave the plan `running' on disk: pause it, save, and re-signal.
     (condition-case err
         (dolist (op ops)
-          (unless quitted
-            (setq quitted (hitl-plan--run-op plan op domain))))
+          (let ((remaining (and limit
+                                (- limit (- pending-before (funcall pending-count))))))
+            (unless (or quitted (and remaining (<= remaining 0)))
+              (setq quitted (hitl-plan--run-op plan op domain remaining)))))
       ((error quit)
        (let ((inhibit-quit t))
          (setf (hitl-plan-status plan) 'paused)
@@ -1074,6 +1089,16 @@ not run."
               'complete))
       (hitl-plan-save plan))
     plan))
+
+(defun hitl-plan-execute-one (plan)
+  "Hand-crank PLAN: execute exactly one pending step, then stay paused.
+Returns PLAN.  Signals `user-error' when no step is pending.  Saved state
+is the ordinary paused state, so `hitl-plan-execute' or another call
+continues where this one stopped."
+  (unless (seq-some (lambda (s) (eq (hitl-plan-step-status s) 'pending))
+                    (hitl-plan-steps plan))
+    (user-error "Plan %s has no pending step" (hitl-plan-id plan)))
+  (hitl-plan-execute plan nil 1))
 
 ;;; Summary (JSON-ready, for MCP)
 

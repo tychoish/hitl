@@ -289,6 +289,20 @@
         (should (string-match-p "\\[missing\\]" (buffer-string)))))))
 
 
+(ert-deftest hitl-plan-ui-test-execute-one-key-and-command ()
+  (hitl-plan-ui-test--with-env
+    (should (eq 'hitl-plan-ui-execute-one (lookup-key hitl-plan-mode-map "o")))
+    (hitl-plan-register-op t 'any :apply #'ignore)
+    (hitl-plan-register-domain 'one :resolve-target #'identity)
+    (let ((plan (hitl-plan-create :domain 'one :targets '(a b) :ops '(any))))
+      (with-temp-buffer
+        (hitl-plan-mode)
+        (setq hitl-plan-ui--plan plan)
+        (hitl-plan-ui-execute-one)
+        (should (equal '(done pending)
+                       (mapcar #'hitl-plan-step-status (hitl-plan-steps plan))))
+        (should (eq 'paused (hitl-plan-status plan)))))))
+
 ;;; Directory carrying, filters, display
 
 (ert-deftest hitl-plan-ui-test/refresh-reloads-from-plan-directory ()
