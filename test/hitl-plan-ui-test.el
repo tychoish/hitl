@@ -549,14 +549,23 @@
   (hitl-plan-ui-test--with-env
     (with-current-buffer (hitl-plan-review (hitl-plan-ui-test--plan))
       (let ((s (buffer-string)))
-        (should (string-match-p "^Run: +\\[C-c C-c/c/x\\] execute +\\[o\\] one step" s)))
+        (should (string-match-p "^Run: +\\[C-c C-c/c/x\\] execute +\\[o\\] one step" s))
+        (should (string-match-p "\\[,\\] commands" s)))
       (seq-do (lambda (line) (should (< (length line) 70)))
               (seq-filter (lambda (l) (string-match-p "\\`\\(Run\\|Select\\|Plan\\|Other\\):" l))
                           (split-string (buffer-string) "\n")))))
+  (should (eq #'hitl-plan-ui-command (keymap-lookup hitl-plan-mode-map ",")))
   (should (eq #'hitl-plan-ui-execute-one (keymap-lookup hitl-plan-mode-map "o")))
   ;; Every legend command is bound to something in the map.
   (seq-do (lambda (e) (should (commandp (nth 2 e))))
           (seq-mapcat #'cdr hitl-plan-ui--key-groups)))
+
+(ert-deftest hitl-plan-ui-test-command-picker-runs-choice ()
+  (let (ran)
+    (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "one step"))
+              ((symbol-function 'hitl-plan-ui-execute-one) (lambda () (interactive) (setq ran t))))
+      (hitl-plan-ui-command))
+    (should ran)))
 
 (provide 'hitl-plan-ui-test)
 ;;; hitl-plan-ui-test.el ends here

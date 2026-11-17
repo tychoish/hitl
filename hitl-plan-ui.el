@@ -203,9 +203,34 @@ defaults to `hitl-plan-ui-max-field-width'; longer text ends in an ellipsis."
      ("d/k" "discard" hitl-plan-ui-discard))
     ("Other" ("RET" "visit" hitl-plan-ui-visit-target)
      ("g" "refresh" hitl-plan-ui-refresh)
-     ("q" "quit" quit-window)))
+     ("q" "quit" quit-window)
+     ("," "commands" hitl-plan-ui-command)))
   "Review-buffer commands as (GROUP (KEYS LABEL COMMAND)...).
-Drives the keys legend; each group renders as one short line.")
+Drives both the keys legend and the `hitl-plan-ui-command' picker; each
+group renders as one short line.")
+
+(defun hitl-plan-ui-command ()
+  "Pick one of the review-buffer commands with completion and run it."
+  (interactive)
+  (let* ((entries (seq-mapcat #'cdr hitl-plan-ui--key-groups))
+         (table (seq-map (lambda (e) (cons (nth 1 e) e)) entries))
+         (choice (completing-read
+                  "Plan command: "
+                  (lambda (string pred action)
+                    (if (eq action 'metadata)
+                        `(metadata
+                          (display-sort-function . identity)
+                          (annotation-function
+                           . ,(lambda (cand)
+                                (when-let* ((e (map-elt table cand)))
+                                  (format "  [%s]  %s" (nth 0 e)
+                                          (or (car (split-string
+                                                    (or (documentation (nth 2 e)) "")
+                                                    "\n"))
+                                              ""))))))
+                      (complete-with-action action table string pred)))
+                  nil t)))
+    (call-interactively (nth 2 (map-elt table choice)))))
 
 (defun hitl-plan-ui--render (plan)
   "Render PLAN into the current buffer, keeping point on the same step."
@@ -608,6 +633,7 @@ For callers (such as the MCP tools) that change PLAN outside the buffer."
   "g"       #'hitl-plan-ui-refresh
   "d"       #'hitl-plan-ui-discard
   "k"       #'hitl-plan-ui-discard
+  ","       #'hitl-plan-ui-command
   "q"       #'quit-window)
 
 (define-derived-mode hitl-plan-mode special-mode "HITL-Plan"
