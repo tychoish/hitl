@@ -231,6 +231,9 @@ each step's status and target.
 | Key                   | Action                                                   |
 |-----------------------+----------------------------------------------------------|
 | =C-c C-c=, =c=, =x=   | Execute all pending steps                                |
+| =o=                   | Execute exactly one pending step, then stay paused       |
+| =,=                   | Pick any review-buffer command with completion           |
+| =S=, =A=              | Skip all / select all pending steps                      |
 | =m=, =u=              | Toggle the step at point between =pending= and =skipped= |
 | =a=                   | Add an operation to the plan                             |
 | =n=                   | Edit the step note (or the plan note on header lines)    |
