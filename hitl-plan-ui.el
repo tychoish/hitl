@@ -189,6 +189,24 @@ defaults to `hitl-plan-ui-max-field-width'; longer text ends in an ellipsis."
              "\n")
      'hitl-plan-step step)))
 
+;;; Key Table
+
+(defconst hitl-plan-ui--key-groups
+  '(("Run" ("C-c C-c/c/x" "execute" hitl-plan-ui-execute)
+     ("o" "one step" hitl-plan-ui-execute-one))
+    ("Select" ("m/u" "toggle" hitl-plan-ui-toggle-skip)
+     ("S" "skip all" hitl-plan-ui-skip-all)
+     ("A" "select all" hitl-plan-ui-select-all))
+    ("Plan" ("a" "add op" hitl-plan-ui-add-op)
+     ("n" "note" hitl-plan-ui-edit-note)
+     ("L" "log-notes" hitl-plan-ui-cycle-log-notes)
+     ("d/k" "discard" hitl-plan-ui-discard))
+    ("Other" ("RET" "visit" hitl-plan-ui-visit-target)
+     ("g" "refresh" hitl-plan-ui-refresh)
+     ("q" "quit" quit-window)))
+  "Review-buffer commands as (GROUP (KEYS LABEL COMMAND)...).
+Drives the keys legend; each group renders as one short line.")
+
 (defun hitl-plan-ui--render (plan)
   "Render PLAN into the current buffer, keeping point on the same step."
   (let* ((inhibit-read-only t)
@@ -236,13 +254,17 @@ defaults to `hitl-plan-ui-max-field-width'; longer text ends in an ellipsis."
                      (mapconcat (lambda (c) (format ", %d %s" (cdr c)
                                                     (hitl-plan-ui-clean-string (car c) 40)))
                                 (hitl-plan-other-counts plan) ""))))
-    (insert (propertize "\nKeys: " 'face 'bold)
-            (propertize "[C-c C-c/c/x]" 'face 'font-lock-keyword-face)
-            " execute  " (propertize "[o]" 'face 'font-lock-keyword-face)
-            " one step  " (propertize "[m/u]" 'face 'font-lock-keyword-face)
-            " toggle  " (propertize "[S/A]" 'face 'font-lock-keyword-face)
-            " skip/select all  [a] add op  [n] note  \
-[L] log-notes  [RET] visit  [g] refresh  [d/k] discard  [q] quit\n\n")
+    (insert "\n")
+    (seq-do (lambda (group)
+              (insert (propertize (format "%-8s" (concat (car group) ":")) 'face 'bold))
+              (seq-do (lambda (entry)
+                        (insert (propertize (format "[%s]" (nth 0 entry))
+                                            'face 'font-lock-keyword-face)
+                                " " (nth 1 entry) "  "))
+                      (cdr group))
+              (insert "\n"))
+            hitl-plan-ui--key-groups)
+    (insert "\n")
     (save-excursion
       (goto-char (point-min))
       (while (re-search-forward "^[[:alpha:]-]+:" nil t)
