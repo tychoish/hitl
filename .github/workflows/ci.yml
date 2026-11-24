@@ -26,13 +26,21 @@ jobs:
 
       - name: Lint Source Code
         uses: tychoish/elisp-ci/lint@main
+        with:
+          elpaish: true
+          dependencies: "mcpkit"
 
       - name: Run ERT Tests
         uses: tychoish/elisp-ci@main
+        with:
+          elpaish: true
+          dependencies: "mcpkit"
 
       - name: Measure Code Coverage
         uses: tychoish/elisp-ci/coverage@main
         with:
+          elpaish: true
+          dependencies: "mcpkit"
           report-format: "lcov"
           output-file: "coverage/lcov.info"
 
