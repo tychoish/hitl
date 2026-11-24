@@ -549,9 +549,9 @@
   (hitl-plan-ui-test--with-env
     (with-current-buffer (hitl-plan-review (hitl-plan-ui-test--plan))
       (let ((s (buffer-string)))
-        (should (string-match-p "^Run: +\\[C-c C-c/c/x\\] execute +\\[o\\] one step" s))
-        (should (string-match-p "\\[,\\] commands" s)))
-      (seq-do (lambda (line) (should (< (length line) 70)))
+        (should (string-match-p "^Run: +\\[c/x\\] +execute +\\[o\\] +one step" s))
+        (should (string-match-p "\\[,\\] +commands" s)))
+      (seq-do (lambda (line) (should (< (length line) 80)))
               (seq-filter (lambda (l) (string-match-p "\\`\\(Run\\|Select\\|Plan\\|Other\\):" l))
                           (split-string (buffer-string) "\n")))))
   (should (eq #'hitl-plan-ui-command (keymap-lookup hitl-plan-mode-map ",")))
@@ -559,6 +559,32 @@
   ;; Every legend command is bound to something in the map.
   (seq-do (lambda (e) (should (commandp (nth 2 e))))
           (seq-mapcat #'cdr hitl-plan-ui--key-groups)))
+
+(ert-deftest hitl-plan-ui-test-key-columns-aligned ()
+  "Each key-block column starts at the same position in every row."
+  (hitl-plan-ui-test--with-env
+    (with-current-buffer (hitl-plan-review (hitl-plan-ui-test--plan))
+      (let* ((rows (seq-filter (lambda (l) (string-match-p "\\`\\(Run\\|Select\\|Plan\\|Other\\):" l))
+                               (split-string (buffer-string) "\n")))
+             (columns (seq-map
+                       (lambda (row)
+                         (let ((start 0) positions)
+                           (while (string-match "\\[[^] ]+\\]" row start)
+                             (push (match-beginning 0) positions)
+                             (setq start (match-end 0)))
+                           (nreverse positions)))
+                       rows)))
+        (should (= 4 (length rows)))
+        (seq-do (lambda (i)
+                  (let ((starts (seq-uniq (seq-keep (lambda (cols) (nth i cols)) columns))))
+                    (should (= 1 (length starts)))))
+                (number-sequence 0 3))
+        ;; title bar extends the full window width, followed by a blank line
+        (goto-char (point-min))
+        (should (eq t (face-attribute 'hitl-plan-ui-title-face :extend nil t)))
+        (should (looking-at "HITL plan "))
+        (forward-line 1)
+        (should (looking-at "^$"))))))
 
 (ert-deftest hitl-plan-ui-test-command-picker-runs-choice ()
   (let (ran)

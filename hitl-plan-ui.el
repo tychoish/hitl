@@ -53,6 +53,16 @@
 
 ;;; Untrusted Text
 
+(defface hitl-plan-ui-title-face
+  '((t :inherit header-line :weight bold :extend t))
+  "Face for the review buffer's title line; `:extend' paints the full width."
+  :group 'hitl-plan)
+
+(defcustom hitl-plan-ui-key-column-gap 4
+  "Number of spaces between columns of the review buffer's key block."
+  :type 'natnum
+  :group 'hitl-plan)
+
 (defcustom hitl-plan-ui-max-field-width 200
   "Maximum display width of any single untrusted string in review buffers.
 Longer descriptions, notes, labels and messages are truncated with an
@@ -192,7 +202,7 @@ defaults to `hitl-plan-ui-max-field-width'; longer text ends in an ellipsis."
 ;;; Key Table
 
 (defconst hitl-plan-ui--key-groups
-  '(("Run" ("C-c C-c/c/x" "execute" hitl-plan-ui-execute)
+  '(("Run" ("c/x" "execute" hitl-plan-ui-execute)
      ("o" "one step" hitl-plan-ui-execute-one))
     ("Select" ("m/u" "toggle" hitl-plan-ui-toggle-skip)
      ("S" "skip all" hitl-plan-ui-skip-all)
@@ -242,10 +252,12 @@ group renders as one short line.")
          (multi (> (length ops) 1))
          restore)
     (erase-buffer)
-    (insert (format "Plan:        %s  [%s]%s\n"
-                    (hitl-plan-ui-clean-string (hitl-plan-id plan) 80)
-                    (hitl-plan-ui-clean-string (hitl-plan-status plan) 20)
-                    (if (hitl-plan-origin-mcp-p plan) "  (created over MCP)" "")))
+    (insert (propertize (format "HITL plan %s  [%s]%s\n"
+                                (hitl-plan-ui-clean-string (hitl-plan-id plan) 80)
+                                (hitl-plan-ui-clean-string (hitl-plan-status plan) 20)
+                                (if (hitl-plan-origin-mcp-p plan) "  (created over MCP)" ""))
+                        'face 'hitl-plan-ui-title-face)
+            "\n")
     (when-let* ((d (hitl-plan-description plan)))
       (insert (format "Description: %s\n" (hitl-plan-ui-clean-string d))))
     (insert (format "Domain:      %s\n" (hitl-plan-ui-clean-string domain 80)))
@@ -280,15 +292,33 @@ group renders as one short line.")
                                                     (hitl-plan-ui-clean-string (car c) 40)))
                                 (hitl-plan-other-counts plan) ""))))
     (insert "\n")
-    (seq-do (lambda (group)
-              (insert (propertize (format "%-8s" (concat (car group) ":")) 'face 'bold))
-              (seq-do (lambda (entry)
-                        (insert (propertize (format "[%s]" (nth 0 entry))
-                                            'face 'font-lock-keyword-face)
-                                " " (nth 1 entry) "  "))
-                      (cdr group))
-              (insert "\n"))
-            hitl-plan-ui--key-groups)
+    (let* ((groups hitl-plan-ui--key-groups)
+           (columns (number-sequence 0 (1- (apply #'max (seq-map (lambda (g) (length (cdr g))) groups)))))
+           (widest (lambda (extract)
+                     (seq-map (lambda (i)
+                                (apply #'max 0 (seq-keep (lambda (g)
+                                                           (when-let* ((e (nth i (cdr g))))
+                                                             (length (funcall extract e))))
+                                                         groups)))
+                              columns)))
+           (key-widths (funcall widest (lambda (e) (format "[%s]" (nth 0 e)))))
+           (label-widths (funcall widest (lambda (e) (nth 1 e))))
+           (gap (make-string hitl-plan-ui-key-column-gap ?\s)))
+      (seq-do (lambda (group)
+                (insert (propertize (format "%-8s" (concat (car group) ":")) 'face 'bold))
+                (seq-do-indexed
+                 (lambda (entry i)
+                   (insert (propertize (string-pad (format "[%s]" (nth 0 entry)) (nth i key-widths))
+                                       'face 'help-key-binding)
+                           "  "
+                           (propertize (if (= i (1- (length (cdr group))))
+                                           (nth 1 entry)
+                                         (string-pad (nth 1 entry) (nth i label-widths)))
+                                       'face 'bold)
+                           (if (= i (1- (length (cdr group)))) "" gap)))
+                 (cdr group))
+                (insert "\n"))
+              groups))
     (insert "\n")
     (save-excursion
       (goto-char (point-min))
