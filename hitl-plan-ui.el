@@ -481,9 +481,15 @@ A plan created over MCP first needs an explicit `yes-or-no-p' approval."
       (when (buffer-live-p (current-buffer))
         (hitl-plan-ui--render plan))
       (hitl-plan-ui--update-indicator))
-    (message "Plan %s [%s]: %d done, %d failed"
-             (hitl-plan-ui-clean-string (hitl-plan-id plan) 60) (hitl-plan-status plan)
-             (hitl-plan-ui--count plan 'done) (hitl-plan-ui--count plan 'failed))))
+    (let ((skipped (hitl-plan-ui--count plan 'skipped)))
+      (message "Plan %s [%s]: %d done, %d failed%s"
+               (hitl-plan-ui-clean-string (hitl-plan-id plan) 60)
+               (hitl-plan-status plan)
+               (hitl-plan-ui--count plan 'done)
+               (hitl-plan-ui--count plan 'failed)
+               (if (> skipped 0)
+                   (format ", %d skipped" skipped)
+                 "")))))
 
 (defun hitl-plan-ui-execute-one ()
   "Execute exactly one pending step of the current plan, then stay paused.

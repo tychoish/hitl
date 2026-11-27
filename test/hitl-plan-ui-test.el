@@ -715,5 +715,32 @@
       (hitl-plan-ui-command))
     (should ran)))
 
+(ert-deftest hitl-plan-ui-test-apply-skip-renders ()
+  "A step skipped by :apply renders as skipped with reason and summary count."
+  (hitl-plan-ui-test--with-env
+    (hitl-plan-register-op 'stub 'maybe
+      :apply (lambda ()
+               (when (equal (plist-get hitl-plan-current-target :name) "Gamma")
+                 (hitl-plan-skip "dirty worktree"))))
+    (let* ((plan (hitl-plan-create
+                  :domain 'stub :ops '(maybe)
+                  :targets (list (list :file "a.org" :name "Alpha")
+                                 (list :file "c.org" :name "Gamma"))))
+           (buf (hitl-plan-review plan nil))
+           (msgs nil))
+      (with-current-buffer buf
+        (cl-letf (((symbol-function 'message)
+                   (lambda (fmt &rest args) (push (apply #'format fmt args) msgs))))
+          (hitl-plan-ui-execute))
+        (should (eq 'complete (hitl-plan-status plan)))
+        (let ((s (buffer-string)))
+          (should (string-match-p "Progress: +1/2 done, 0 pending, 0 failed, 1 skipped" s))
+          (should (string-match-p "\\[ \\] +2 \\[skipped\\] c\\.org +Gamma — dirty worktree" s)))
+        (should (seq-some (lambda (m) (string-match-p "1 done, 0 failed, 1 skipped" m))
+                          msgs))
+        (hitl-plan-ui-test--goto-step 2)
+        (should (eq 'hitl-plan-skipped-face
+                    (get-text-property (+ 4 (line-beginning-position)) 'face)))))))
+
 (provide 'hitl-plan-ui-test)
 ;;; hitl-plan-ui-test.el ends here

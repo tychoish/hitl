@@ -325,7 +325,8 @@ DOMAIN is a name (symbol or string) or a `hitl-plan-domain'.  The domain's
             from-json schema order-last extra resume)
   "Register operation NAME under DOMAIN (a symbol, or t for any domain).
 KEY is an optional character that must be unique within DOMAIN.  APPLY is
-called with the operation's args; READ-ARGS interactively returns an arg
+called with the operation's args (and may return `hitl-plan-skip' to mark
+the step skipped); READ-ARGS interactively returns an arg
 list; VALIDATE is called with the args and returns a problem string or nil;
 DESCRIBE receives the args and returns a string; FROM-JSON maps a JSON
 alist to an arg list; SCHEMA documents arguments; QUEUEABLE marks
@@ -1153,6 +1154,17 @@ execution continues at the next unfinished step."
   (setf (hitl-plan-status plan) 'paused)
   plan)
 
+(defun hitl-plan-skip (&optional reason)
+  "Return a skip marker for an operation `:apply' function.
+When `:apply' returns this marker, `hitl-plan-run-step' marks the step
+`skipped' with REASON (a string, or nil) as its message instead of `done',
+and skips `inject-note' and `hitl-plan-step-functions'."
+  (cons :hitl-plan-skip reason))
+
+(defun hitl-plan-skip-p (value)
+  "Return non-nil if VALUE is a skip marker from `hitl-plan-skip'."
+  (eq (car-safe value) :hitl-plan-skip))
+
 (defun hitl-plan--unresolved (plan step)
   "Mark STEP of PLAN unresolvable using the domain's status and message."
   (let* ((domain (hitl-plan-get-domain (hitl-plan-domain plan)))
@@ -1194,7 +1206,9 @@ execution continues at the next unfinished step."
   "Run pending or ready STEP of PLAN under OP, quit-safely, and save PLAN.
 RESOLVED is the already-resolved target; when nil the domain resolves it.
 Domain drivers call this for each target.  On success STEP becomes `done'
-and `hitl-plan-step-functions' runs; errors mark it `failed'.  If \\[keyboard-quit]
+and `hitl-plan-step-functions' runs; if `:apply' returns a marker from
+`hitl-plan-skip', STEP becomes `skipped' with its reason as message and
+notes/hooks are skipped; errors mark it `failed'.  If \\[keyboard-quit]
 interrupts the application the step stays `pending' and `quit-flag' is left
 set for the caller.  Returns the step's resulting status, or nil when STEP
 was not runnable.  A ready ordered step calls RESUME with its response
@@ -1214,7 +1228,8 @@ a ready step leaves it ready, so only RESUME is repeated."
            (hitl-plan-current-target resolved)
            (resuming (eq (hitl-plan-step-status step) 'ready))
            (inhibit-quit t)
-           (completed nil))
+           (completed nil)
+           (apply-res nil))
       (cond
        ((null spec)
         (hitl-plan--fail step (format "Unknown operation: %s" (hitl-plan-op-name op))))
@@ -1231,32 +1246,41 @@ a ready step leaves it ready, so only RESUME is repeated."
                      (when-let* ((validate (hitl-plan-op-spec-validate spec))
                                  (problem (apply validate args)))
                        (error "%s" problem))
-                     (if resuming
-                         (progn
-                           (unless (hitl-plan-op-spec-resume spec)
-                             (error "Operation %s has no resume handler"
-                                    (hitl-plan-op-name op)))
-                           (apply (hitl-plan-op-spec-resume spec)
-                                  (hitl-plan-step-response step) args))
-                       (apply (hitl-plan-op-spec-apply spec) args))
-                     (when-let* ((inject (and domain (hitl-plan-domain-inject-note domain)))
-                                 (text (pcase (hitl-plan-log-notes plan)
-                                         ('one (hitl-plan-note plan))
-                                         ('each (hitl-plan-step-note step))))
-                                 ((not (string-empty-p text))))
-                       (funcall inject text step plan)))))
+                     (setq apply-res
+                           (if resuming
+                               (progn
+                                 (unless (hitl-plan-op-spec-resume spec)
+                                   (error "Operation %s has no resume handler"
+                                          (hitl-plan-op-name op)))
+                                 (apply (hitl-plan-op-spec-resume spec)
+                                        (hitl-plan-step-response step) args))
+                             (apply (hitl-plan-op-spec-apply spec) args)))
+                     (unless (hitl-plan-skip-p apply-res)
+                       (when-let* ((inject (and domain (hitl-plan-domain-inject-note domain)))
+                                   (text (pcase (hitl-plan-log-notes plan)
+                                           ('one (hitl-plan-note plan))
+                                           ('each (hitl-plan-step-note step))))
+                                   ((not (string-empty-p text))))
+                         (funcall inject text step plan))))))
                 (setq completed t))
               (when completed
-                (setf (hitl-plan-step-status step) 'done
-                      (hitl-plan-step-message step) nil)
-                (condition-case herr
-                    (hitl-plan--call-at
-                     resolved
-                     (lambda ()
-                       (run-hook-with-args 'hitl-plan-step-functions step plan)))
-                  (error
-                   (setf (hitl-plan-step-message step)
-                         (format "step hook error: %s" (error-message-string herr)))))))
+                (if (hitl-plan-skip-p apply-res)
+                    (let ((reason (cdr apply-res)))
+                      (setf (hitl-plan-step-status step) 'skipped
+                            (hitl-plan-step-message step)
+                            (cond ((null reason) nil)
+                                  ((stringp reason) (unless (string-empty-p reason) reason))
+                                  (t (format "%s" reason)))))
+                  (setf (hitl-plan-step-status step) 'done
+                        (hitl-plan-step-message step) nil)
+                  (condition-case herr
+                      (hitl-plan--call-at
+                       resolved
+                       (lambda ()
+                         (run-hook-with-args 'hitl-plan-step-functions step plan)))
+                    (error
+                     (setf (hitl-plan-step-message step)
+                           (format "step hook error: %s" (error-message-string herr))))))))
           (hitl-plan-suspension
            (setf (hitl-plan-step-status step) 'waiting
                  (hitl-plan-step-request step) (cadr err)

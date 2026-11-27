@@ -603,5 +603,32 @@
       (setf (hitl-plan-metadata agent) '(:origin mcp :approved t))
       (should (hitl-plan-approved-p agent)))))
 
+(ert-deftest hitl-plan-mcp-test/apply-skip-summary ()
+  "MCP status and execute report skipped steps triggered by :apply."
+  (hitl-plan-mcp-test--with-env
+    (hitl-plan-register-op 'stub 'maybe :queueable t
+      :apply (lambda ()
+               (when (equal (plist-get hitl-plan-current-target :file) "b.org")
+                 (hitl-plan-skip "unpushed commits"))))
+    (let* ((hitl-plan-agent-may-apply t)
+           (created (hitl-plan-mcp-create
+                     :domain "stub"
+                     :targets [(:file "a.org" :name "A") (:file "b.org" :name "B")]
+                     :ops [(:op "maybe")]
+                     :show :json-false))
+           (id (plist-get created :plan_id))
+           (res (hitl-plan-mcp-execute :plan_id id))
+           (status-res (hitl-plan-mcp-status :plan_id id))
+           (counts (plist-get res :counts))
+           (steps (plist-get res :steps)))
+      (should (equal "complete" (plist-get res :status)))
+      (should (= 2 (plist-get counts :total)))
+      (should (= 1 (plist-get counts :done)))
+      (should (= 1 (plist-get counts :skipped)))
+      (should (= 0 (plist-get counts :failed)))
+      (should (equal "skipped" (plist-get (aref steps 1) :status)))
+      (should (equal "unpushed commits" (plist-get (aref steps 1) :message)))
+      (should (equal counts (plist-get status-res :counts))))))
+
 (provide 'hitl-plan-mcp-test)
 ;;; hitl-plan-mcp-test.el ends here

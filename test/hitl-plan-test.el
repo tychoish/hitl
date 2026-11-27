@@ -1210,5 +1210,96 @@
       (let ((plan (hitl-plan-create :targets '(x) :ops '(noop) :status st)))
         (should-error (hitl-plan-execute plan) :type 'user-error)))))
 
+(ert-deftest hitl-plan-test-apply-skip-marker ()
+  "An :apply returning `hitl-plan-skip' marks the step skipped with reason."
+  (hitl-plan-test--with-env
+    (let (injected step-hook-ids after-apply-ids applied-targets)
+      (hitl-plan-register-domain 'skipdom
+        :resolve-target #'identity
+        :inject-note (lambda (_text step _plan)
+                       (push (hitl-plan-step-id step) injected)))
+      (hitl-plan-register-op 'skipdom 'check
+        :apply (lambda ()
+                 (push hitl-plan-current-target applied-targets)
+                 (pcase hitl-plan-current-target
+                   ('skip-reason (hitl-plan-skip "dirty worktree"))
+                   ('skip-empty (hitl-plan-skip ""))
+                   ('skip-nil (hitl-plan-skip))
+                   ('fail-one (error "boom"))
+                   (_ (push hitl-plan-current-target hitl-plan-test--log)))))
+      (add-hook 'hitl-plan-step-functions
+                (lambda (step _plan) (push (hitl-plan-step-id step) step-hook-ids)))
+      (add-hook 'hitl-plan-after-apply-functions
+                (lambda (_file steps _plan)
+                  (setq after-apply-ids (seq-map #'hitl-plan-step-id steps))))
+      (should (hitl-plan-skip-p (hitl-plan-skip "why")))
+      (should (hitl-plan-skip-p (hitl-plan-skip)))
+      (should-not (hitl-plan-skip-p nil))
+      (should-not (hitl-plan-skip-p 'skipped))
+      (should-not (hitl-plan-skip-p '(:other . 1)))
+      (let ((plan (hitl-plan-create
+                   :domain 'skipdom
+                   :targets '(ok-one skip-reason skip-empty skip-nil fail-one)
+                   :ops '(check)
+                   :log-notes 'one
+                   :note "logged")))
+        ;; Execute first two steps, then resume to verify skipped is not re-run.
+        (hitl-plan-execute plan nil 2)
+        (should (eq 'paused (hitl-plan-status plan)))
+        (should (equal '(done skipped pending pending pending)
+                       (seq-map #'hitl-plan-step-status (hitl-plan-steps plan))))
+        (setq applied-targets nil)
+        (hitl-plan-execute plan)
+        (should (eq 'complete (hitl-plan-status plan)))
+        (should (equal '(skip-empty skip-nil fail-one) (nreverse applied-targets)))
+        (let ((steps (hitl-plan-steps plan)))
+          (should (equal '(done skipped skipped skipped failed)
+                         (seq-map #'hitl-plan-step-status steps)))
+          (should (equal "dirty worktree" (hitl-plan-step-message (nth 1 steps))))
+          (should-not (hitl-plan-step-message (nth 2 steps)))
+          (should-not (hitl-plan-step-message (nth 3 steps)))
+          (should (equal "boom" (hitl-plan-step-message (nth 4 steps)))))
+        ;; Only the `done' step triggered inject-note, step hook, and after-apply.
+        (should (equal '(1) injected))
+        (should (equal '(1) step-hook-ids))
+        (should (equal '(1) after-apply-ids))
+        ;; Summary counts distinguish done, skipped, and failed.
+        (let ((counts (plist-get (hitl-plan-summary plan) :counts)))
+          (should (= 5 (plist-get counts :total)))
+          (should (= 1 (plist-get counts :done)))
+          (should (= 3 (plist-get counts :skipped)))
+          (should (= 1 (plist-get counts :failed)))
+          (should (= 0 (plist-get counts :pending))))
+        ;; .eld round-trip preserves skipped status and reason.
+        (clrhash hitl-plan--store)
+        (let ((loaded (hitl-plan-load (hitl-plan-id plan))))
+          (should (eq 'complete (hitl-plan-status loaded)))
+          (should (equal '(done skipped skipped skipped failed)
+                         (seq-map #'hitl-plan-step-status (hitl-plan-steps loaded))))
+          (should (equal "dirty worktree"
+                         (hitl-plan-step-message (nth 1 (hitl-plan-steps loaded))))))))))
+
+(ert-deftest hitl-plan-test-driver-apply-skip-marker ()
+  "Domain :driver calls receive `skipped' from `hitl-plan-run-step'."
+  (hitl-plan-test--with-env
+    (let (statuses)
+      (hitl-plan-register-op 'drv 'act
+        :apply (lambda ()
+                 (when (eq hitl-plan-current-target 'skip-me)
+                   (hitl-plan-skip "not applicable"))))
+      (hitl-plan-register-domain 'drv
+        :resolve-target #'identity
+        :driver (lambda (plan op _pending resolved)
+                  (seq-do (lambda (cell)
+                            (push (hitl-plan-run-step plan (car cell) op (cdr cell))
+                                  statuses))
+                          resolved)))
+      (let ((plan (hitl-plan-create :domain 'drv :targets '(run-me skip-me) :ops '(act))))
+        (hitl-plan-execute plan)
+        (should (eq 'complete (hitl-plan-status plan)))
+        (should (equal '(done skipped) (nreverse statuses)))
+        (should (equal "not applicable"
+                       (hitl-plan-step-message (nth 1 (hitl-plan-steps plan)))))))))
+
 (provide 'hitl-plan-test)
 ;;; hitl-plan-test.el ends here
