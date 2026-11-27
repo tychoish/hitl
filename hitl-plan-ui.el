@@ -113,6 +113,9 @@ defaults to `hitl-plan-ui-max-field-width'; longer text ends in an ellipsis."
 (defvar-local hitl-plan-ui--plan nil
   "The `hitl-plan' displayed in this review buffer.")
 
+(defvar-local hitl-plan-ui--default-directory nil
+  "Fallback working directory for the review buffer.")
+
 (defvar hitl-plan-resume-history nil
   "Minibuffer history for `hitl-plan-resume'.")
 
@@ -197,13 +200,18 @@ defaults to `hitl-plan-ui-max-field-width'; longer text ends in an ellipsis."
                  (propertize (format "  {%s}" (hitl-plan-ui-clean-string note)) 'face 'shadow)
                "")
              "\n")
-     'hitl-plan-step step)))
+     'hitl-plan-step step
+     'hitl-plan-directory (hitl-plan-step-directory plan step))))
 
 ;;; Key Table
 
 (defconst hitl-plan-ui--key-groups
   '(("Run" ("c/x" "execute" hitl-plan-ui-execute)
      ("o" "one step" hitl-plan-ui-execute-one))
+    ("Recover" ("r" "retry" hitl-plan-ui-retry)
+     ("C" "reset" hitl-plan-ui-reset)
+     ("R" "rebuild" hitl-plan-ui-regenerate)
+     ("f" "fix" hitl-plan-ui-recover-step))
     ("Select" ("m/u" "toggle" hitl-plan-ui-toggle-skip)
      ("S" "skip all" hitl-plan-ui-skip-all)
      ("A" "select all" hitl-plan-ui-select-all))
@@ -330,7 +338,8 @@ group renders as one short line.")
           (insert (hitl-plan-ui--format-step plan step multi))
           (when (and prev-id (eql prev-id (hitl-plan-step-id step)))
             (setq restore start))))
-      (goto-char (or restore first-step)))))
+      (goto-char (or restore first-step))
+      (hitl-plan-ui--update-directory))))
 
 ;;; Entry Points
 
@@ -353,7 +362,8 @@ build the buffer without touching windows or the selected buffer."
   (let* ((plan (hitl-plan-ui--resolve-plan plan-or-id))
          (buf (get-buffer-create (hitl-plan-ui-buffer-name plan))))
     (with-current-buffer buf
-      (hitl-plan-mode)
+      (unless (derived-mode-p 'hitl-plan-mode)
+        (hitl-plan-mode))
       (setq hitl-plan-ui--plan plan)
       (hitl-plan-ui--render plan))
     (when display (pop-to-buffer buf))
@@ -634,6 +644,53 @@ For callers (such as the MCP tools) that change PLAN outside the buffer."
     (setq hitl-plan-ui--plan fresh)
     (hitl-plan-ui--render fresh)))
 
+(defun hitl-plan-ui--update-directory ()
+  "Set the working directory from the step at point or the buffer fallback."
+  (setq default-directory
+        (or (get-text-property (line-beginning-position) 'hitl-plan-directory)
+            hitl-plan-ui--default-directory default-directory)))
+
+(defun hitl-plan-ui-retry ()
+  "Reset failed steps of the current plan for another execution."
+  (interactive)
+  (let ((plan (hitl-plan-ui--plan)))
+    (hitl-plan-reset plan '(failed))
+    (hitl-plan-ui--render plan)
+    (hitl-plan-ui--update-indicator)))
+
+(defun hitl-plan-ui-reset ()
+  "Reset all steps after confirming the risk of repeating side effects."
+  (interactive)
+  (let ((plan (hitl-plan-ui--plan)))
+    (when (yes-or-no-p "Reset ALL steps, potentially repeating side effects? ")
+      (hitl-plan-reset plan)
+      (hitl-plan-ui--render plan)
+      (hitl-plan-ui--update-indicator))))
+
+(defun hitl-plan-ui-regenerate ()
+  "Regenerate the plan's targets after confirming loss of step progress."
+  (interactive)
+  (let ((plan (hitl-plan-ui--plan)))
+    (when (yes-or-no-p "Regenerate targets, losing progress and risking repeated side effects? ")
+      (hitl-plan-regenerate plan)
+      (hitl-plan-ui--render plan)
+      (hitl-plan-ui--update-indicator))))
+
+(defun hitl-plan-ui-recover-step ()
+  "Dispatch the domain's recovery action for the failed step at point."
+  (interactive)
+  (let* ((plan (hitl-plan-ui--plan))
+         (step (hitl-plan-ui--step))
+         (domain (hitl-plan-get-domain (hitl-plan-domain plan)))
+         (callback (and domain (hitl-plan-domain-recover-step domain)))
+         (default-directory (or (hitl-plan-step-directory plan step)
+                                default-directory)))
+    (unless (eq (hitl-plan-step-status step) 'failed)
+      (user-error "Only failed steps have recovery actions"))
+    (unless callback
+      (user-error "Domain %s has no recovery action" (hitl-plan-domain plan)))
+    (funcall callback plan step)))
+
 (defun hitl-plan-ui-discard ()
   "Discard the current plan after confirmation and close its buffer."
   (interactive)
@@ -661,6 +718,10 @@ For callers (such as the MCP tools) that change PLAN outside the buffer."
   "L"       #'hitl-plan-ui-cycle-log-notes
   "RET"     #'hitl-plan-ui-visit-target
   "g"       #'hitl-plan-ui-refresh
+  "r"       #'hitl-plan-ui-retry
+  "C"       #'hitl-plan-ui-reset
+  "R"       #'hitl-plan-ui-regenerate
+  "f"       #'hitl-plan-ui-recover-step
   "d"       #'hitl-plan-ui-discard
   "k"       #'hitl-plan-ui-discard
   ","       #'hitl-plan-ui-command
@@ -669,7 +730,9 @@ For callers (such as the MCP tools) that change PLAN outside the buffer."
 (define-derived-mode hitl-plan-mode special-mode "HITL-Plan"
   "Major mode for reviewing and executing a `hitl-plan'."
   :group 'hitl-plan
-  (setq truncate-lines t))
+  (setq truncate-lines t)
+  (setq hitl-plan-ui--default-directory default-directory)
+  (add-hook 'post-command-hook #'hitl-plan-ui--update-directory nil t))
 
 (provide 'hitl-plan-ui)
 ;;; hitl-plan-ui.el ends here

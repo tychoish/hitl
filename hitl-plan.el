@@ -180,7 +180,8 @@ explicit targets so an agent cannot show one thing and act on another."
   name label resolve-target capture-target format-target visit-target
   build-batch rebuild-batch lock-batch unlock-batch driver inject-note
   unresolved-status unresolved-message accept-buffer
-  directory migrate-plist after-steps-added sanitize-target)
+  directory migrate-plist after-steps-added sanitize-target
+  target-directory regenerate recover-step after-reset)
 
 (defvar hitl-plan--store (make-hash-table :test #'equal)
   "In-memory cache of `hitl-plan' objects keyed by ID.
@@ -239,7 +240,8 @@ sets by queueing the plan interactively (see
     (name &key label resolve-target capture-target format-target visit-target
           build-batch rebuild-batch lock-batch unlock-batch driver inject-note
           unresolved-status unresolved-message accept-buffer
-          directory migrate-plist after-steps-added sanitize-target)
+          directory migrate-plist after-steps-added sanitize-target
+          target-directory regenerate recover-step after-reset)
   "Register (or replace) target domain NAME and return its struct.
 The keyword arguments LABEL (default: the symbol name), RESOLVE-TARGET,
 CAPTURE-TARGET, FORMAT-TARGET, VISIT-TARGET, BUILD-BATCH, REBUILD-BATCH,
@@ -247,6 +249,10 @@ LOCK-BATCH, UNLOCK-BATCH, DRIVER, INJECT-NOTE, UNRESOLVED-STATUS,
 UNRESOLVED-MESSAGE, ACCEPT-BUFFER, DIRECTORY, MIGRATE-PLIST,
 AFTER-STEPS-ADDED and SANITIZE-TARGET populate the like-named
 `hitl-plan-domain' slots.
+TARGET-DIRECTORY takes a target and returns its working directory.
+REGENERATE takes a plan and returns fresh targets for its operations.
+RECOVER-STEP takes a plan and failed step and dispatches a recovery action.
+AFTER-RESET takes a plan and its reset steps to clear domain-specific state.
 Domains are kept in registration order (re-registering keeps a
 domain's place), which breaks ties whenever several domains match, for
 example two domains sharing one :directory store."
@@ -265,7 +271,9 @@ example two domains sharing one :directory store."
             :unresolved-message unresolved-message
             :accept-buffer accept-buffer :directory directory
             :migrate-plist migrate-plist :after-steps-added after-steps-added
-            :sanitize-target sanitize-target)
+            :sanitize-target sanitize-target
+            :target-directory target-directory :regenerate regenerate
+            :recover-step recover-step :after-reset after-reset)
            hitl-plan--domain-registry))
 
 (defun hitl-plan-in-domain-p (plan name)
@@ -839,6 +847,81 @@ steps are pending, saves, and returns PLAN.  The domain's
                          new-steps))
       (setf (hitl-plan-status plan) 'paused))
     (hitl-plan-save plan)))
+
+(defun hitl-plan-reset (plan &optional statuses)
+  "Reset PLAN steps to pending and save, returning PLAN.
+Only steps in STATUSES are reset when non-nil.  Otherwise reset all steps,
+including successful ones: applying them again may repeat side effects.
+Domain-specific state is cleared by the domain's :after-reset callback.
+Running and discarded plans cannot be reset.  Agent approval is revoked."
+  (when (memq (hitl-plan-status plan) '(running discarded))
+    (user-error "Cannot reset a %s plan" (hitl-plan-status plan)))
+  (let ((steps (seq-filter
+                (lambda (step)
+                  (or (null statuses) (memq (hitl-plan-step-status step) statuses)))
+                (hitl-plan-steps plan))))
+    (when steps
+      (seq-do (lambda (step)
+                (setf (hitl-plan-step-status step) 'pending
+                      (hitl-plan-step-message step) nil))
+              steps)
+      (setf (hitl-plan-status plan) 'draft
+            (hitl-plan-metadata plan)
+            (plist-put (hitl-plan-metadata plan) :approved nil))
+      (when-let* ((callback (hitl-plan-domain-after-reset
+                            (hitl-plan-get-domain (hitl-plan-domain plan)))))
+        (funcall callback plan steps))
+      (hitl-plan-save plan)))
+  plan)
+
+(defun hitl-plan-regenerate (plan)
+  "Rebuild PLAN from fresh domain targets, reset its steps and save it.
+The domain's :regenerate callback receives PLAN and returns a target list.
+Operations, identity, scope and origin are retained.  Old step progress is
+discarded, so execution may repeat side effects.  Return PLAN."
+  (when (memq (hitl-plan-status plan) '(running discarded))
+    (user-error "Cannot regenerate a %s plan" (hitl-plan-status plan)))
+  (let* ((domain (hitl-plan-get-domain (hitl-plan-domain plan)))
+         (callback (hitl-plan-domain-regenerate domain)))
+    (unless callback
+      (user-error "Domain %s cannot regenerate plans" (hitl-plan-domain plan)))
+    (let ((targets (funcall callback plan))
+          (step-id 0))
+      (unless (proper-list-p targets)
+        (error "Regenerated targets must be a list"))
+      (setf (hitl-plan-steps plan)
+            (seq-mapcat
+             (lambda (op)
+               (seq-map (lambda (target)
+                          (setq step-id (1+ step-id))
+                          (hitl-plan--make-step step-id target op))
+                        targets))
+             (hitl-plan-ops plan))
+            (hitl-plan-status plan) 'draft
+            (hitl-plan-metadata plan)
+            (plist-put (hitl-plan-metadata plan) :approved nil))
+      (when-let* ((hook (hitl-plan-domain-after-steps-added domain))
+                  (steps (hitl-plan-steps plan)))
+        (funcall hook plan steps))
+      (when-let* ((hook (hitl-plan-domain-after-reset domain)))
+        (funcall hook plan (hitl-plan-steps plan)))
+      (hitl-plan-save plan))))
+
+(defun hitl-plan-step-directory (plan step)
+  "Return the working directory of STEP in PLAN, or nil.
+Use the domain's :target-directory callback, falling back to a plist
+target's :directory or the parent directory of its :file."
+  (let* ((target (hitl-plan-step-target step))
+         (domain (hitl-plan-get-domain (hitl-plan-domain plan)))
+         (callback (and domain (hitl-plan-domain-target-directory domain)))
+         (directory
+          (or (and callback (funcall callback target))
+              (and (consp target) (plistp target)
+                   (or (plist-get target :directory)
+                       (when-let* ((file (plist-get target :file)))
+                         (file-name-directory (expand-file-name file))))))))
+    (when (stringp directory)
+      (file-name-as-directory (expand-file-name directory)))))
 
 ;;; Execution
 

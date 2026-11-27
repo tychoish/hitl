@@ -93,6 +93,10 @@ slots, all of them optional:
 | =:directory=          | String or function returning the domain's default plan store             |
 | =:migrate-plist=      | =(lambda (PLIST))= returning upgraded legacy saved data                  |
 | =:after-steps-added=  | =(lambda (PLAN NEW-STEPS))=, run by create (all steps) and add-op (new)  |
+| =:target-directory=   | =(lambda (TARGET))= returning its working directory                     |
+| =:regenerate=         | =(lambda (PLAN))= returning fresh targets                               |
+| =:recover-step=       | =(lambda (PLAN STEP))= dispatching recovery for a failed step            |
+| =:after-reset=        | =(lambda (PLAN RESET-STEPS))= clearing domain-specific execution state   |
 
 ~:directory~ supplies the store for [[file:hitl-plan.el::hitl-plan-create][~hitl-plan-create~]] when the caller gives no
 directory, and for [[file:hitl-plan.el::hitl-plan-list][~hitl-plan-list~]] and [[file:hitl-plan.el::hitl-plan-get][~hitl-plan-get~]] when the caller gives a
@@ -240,8 +244,20 @@ each step's status and target.
 | =L=                   | Cycle log-notes mode (=ignore=, =one=, =each=)           |
 | =RET=                 | Visit the target in another window                       |
 | =g=                   | Refresh                                                  |
+| =r=                   | Reset failed steps for retry                             |
+| =C=                   | Reset all steps, after confirming repeated side effects  |
+| =R=                   | Regenerate targets and reset progress, after confirmation |
+| =f=                   | Dispatch the domain's recovery action for a failed step |
 | =d=, =k=              | Discard the plan (after confirmation)                    |
 | =q=                   | Bury the buffer (the plan stays saved)                   |
+
+On a step line, =default-directory= follows the domain's =:target-directory=
+callback, or the target's =:directory= or =:file= parent. Header lines use
+the review buffer's original directory. Resetting and regenerating preserve
+the plan's identity and origin, and revoke unattended agent approval.
+Regeneration retains operations and scope while replacing all targets and
+step progress. Domains clear execution metadata in =:after-reset=; during
+regeneration this callback receives the newly generated steps.
 
 ** Resuming Plans with hitl-plan-resume
 
