@@ -201,6 +201,134 @@ domain: [[file:hitl-plan.el::hitl-plan-step-functions][~hitl-plan-step-functions
 ~hitl-plan-after-apply-functions~ runs after execution with the newly done
 steps.
 
+** Dynamic Workflows in Step Order
+
+Plan authors can opt into =:execution 'steps= when calling
+~hitl-plan-create~. The executor follows the saved step list, pausing at the
+first failure, unresolved target, or suspension. Completed and skipped steps
+are never replayed during normal continuation. Bulk execution remains the
+default. Ordered execution uses the domain's target resolver and normal
+step hooks, but does not call its batch driver or honor =:order-last=.
+Filtering execution by operation is rejected because it could bypass a gate.
+
+*** Suspend and Resume
+
+Register an operation with both =:apply= and =:resume=. The apply handler calls
+~hitl-plan-suspend~ with readable Lisp data describing what it needs. This
+exits the handler, saves the request on the step, marks it =waiting=, and
+pauses execution before any subsequent step. Calling execute again while
+waiting does nothing to the step and does not repeat the apply handler.
+
+~hitl-plan-resolve-step~ takes a plan, a stable step ID, and a response. It
+saves the response and marks the step =ready=; it does not execute anything.
+Nil is a valid response. A later ~hitl-plan-execute~ calls the registered
+resume handler with the response followed by the original operation arguments.
+The handler runs with the usual ~hitl-plan-current-plan~,
+~hitl-plan-current-step~, ~hitl-plan-current-op~, and
+~hitl-plan-current-target~ bindings. It can complete normally, suspend again,
+insert work, skip a branch, or stop the plan.
+
+Only data is needed in the saved request and response; handlers live in the
+operation registry and must be registered again after restarting Emacs.
+Unreadable values such as buffers and processes are rejected. The core API
+does not create a UI question, dispatch a queue item, or automatically resume
+execution. Those integrations belong to the plan author, who can correlate
+an external question or task ID with a waiting step.
+
+*** Confirm Before Continuing
+
+#+begin_src emacs-lisp
+(hitl-plan-register-domain 'release :resolve-target #'identity)
+
+(hitl-plan-register-op 'release 'confirm
+  :apply (lambda ()
+           (hitl-plan-suspend '(:kind confirm :prompt "Publish this release?")))
+  :resume (lambda (approved)
+            (unless approved
+              (hitl-plan-discard hitl-plan-current-plan))))
+
+(hitl-plan-register-op 'release 'publish :apply #'my-publish-release)
+
+(setq release-plan
+      (hitl-plan-create :domain 'release :execution 'steps
+                        :targets '((:repository "my-project"))
+                        :ops '(confirm publish)))
+
+(hitl-plan-execute release-plan)
+(hitl-plan-resolve-step release-plan 1 t)
+(hitl-plan-execute release-plan)
+#+end_src
+
+The first execution stops at the confirmation step. An affirmative response
+runs its resume handler and then publishes; a nil response discards the plan
+and leaves publish unexecuted. ~my-publish-release~ is the author's operation.
+
+*** Choose or Insert the Next Work
+
+~hitl-plan-insert-steps~ takes a plan, a step ID to insert before (nil to
+append), and a list of =(:op OP :target TARGET)= entries. OP accepts the
+same forms as ~hitl-plan-create~. It returns the new step objects with fresh
+stable IDs, invokes the domain's =:after-steps-added= callback, and preserves
+existing IDs and step order. ~hitl-plan-add-op~ also preserves ordered plans'
+step order when appending an operation.
+
+A resume handler can choose which operations to insert from its saved answer:
+
+#+begin_src emacs-lisp
+(hitl-plan-register-op 'release 'choose
+  :apply (lambda ()
+           (hitl-plan-suspend '(:kind choice :options (review publish))))
+  :resume (lambda (choice)
+            (unless (memq choice '(review publish))
+              (user-error "Unknown release action: %S" choice))
+            (hitl-plan-insert-steps
+             hitl-plan-current-plan nil
+             (list (list :op choice
+                         :target (hitl-plan-step-target hitl-plan-current-step))))))
+#+end_src
+
+Register =review= and =publish= before selecting them. A plan containing only
+=choose= grows by the selected operation, which runs in the same execution
+after the choice handler completes. For branches already present in a plan,
+~hitl-plan-skip-step~ takes a step ID and optional explanatory message. Skip
+the unselected branch before returning from the choice handler.
+
+*** Repair and Retry
+
+After a step fails, insert a repair operation immediately before its ID.
+That repair operation can dispatch external work and suspend with its task
+ID. Its resume handler checks the result and calls ~hitl-plan-retry-step~
+with the original failed step ID. Execution then retries that step before
+continuing downstream. The same retry API supports a human fixing the failure
+and explicitly retrying it, without an inserted repair operation.
+
+~hitl-plan-retry-step~ resets only the selected failed step and invokes the
+domain's =:after-reset= callback for it. A failure in a resume handler retries
+that handler with the saved response; it never restarts the apply handler.
+~hitl-plan-step-history~ retains prior requests, responses, failures, and
+transition timestamps across saves and retries. Explicit ~hitl-plan-reset~
+still deliberately resets selected steps to their initial apply phase.
+
+*** Pause, Stop, and Interruption
+
+~hitl-plan-pause~ pauses after the current handler completes normally; the
+next explicit execution starts with the next unfinished step.
+~hitl-plan-discard~ stops the plan permanently. ~hitl-plan-execute-one~ counts
+one apply or resume attempt. Failed, missing, and waiting steps block all
+later work until an author resolves, retries, or skips them.
+
+An interrupted apply handler stays =pending=; an interrupted resume handler
+stays =ready= with its response. Handlers must make any external side effects
+idempotent, since an interruption before their checkpoint can repeat that
+handler. Mutations made through the flow API inside a handler are saved with
+its resulting step status. Execution is not a transaction over external
+systems. On reload, saved =running= checkpoints without an active executor
+in this Emacs are recovered as paused plans.
+
+Dynamic executable insertion is a trusted Lisp API. MCP-origin plans and
+restricted execution cannot insert executable steps. No new MCP mutation or
+resolution tools are exposed by this extension.
+
 ** Persistence in One .eld File per Plan
 
 Plan ids are assumed unique across stores. The in-memory cache is keyed by id

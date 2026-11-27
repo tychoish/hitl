@@ -135,10 +135,11 @@ as touching files outside an allow-list.")
                          (:copier nil))
   "A saved, resumable bulk action plan.
 STATUS is one of `draft', `running', `paused', `complete', or `discarded'.
-LOG-NOTES is one of `ignore', `one', or `each'."
+LOG-NOTES is one of `ignore', `one', or `each'.
+EXECUTION is `bulk' for operation batches, or `steps' for ordered workflows."
   id domain created updated description scope ops
   (log-notes hitl-plan-log-notes) note steps (status 'draft)
-  directory metadata)
+  directory metadata (execution 'bulk))
 
 (cl-defstruct (hitl-plan-op (:constructor hitl-plan-op--make)
                             (:copier nil))
@@ -150,14 +151,16 @@ LOG-NOTES is one of `ignore', `one', or `each'."
   "One target and operation pairing in a `hitl-plan'.
 OP is the `hitl-plan-op' (the same object held in the plan's ops).
 STATUS is one of `pending', `done', `failed', `skipped', or a domain-chosen
-terminal status such as `missing' (see `hitl-plan-domain' UNRESOLVED-STATUS)."
-  id target op (status 'pending) note message)
+terminal status such as `missing' (see `hitl-plan-domain' UNRESOLVED-STATUS).
+Ordered plans also use `waiting' and `ready'.  REQUEST and RESPONSE hold
+suspension data.  HISTORY records transitions, including prior failures."
+  id target op (status 'pending) note message request response history)
 
 (cl-defstruct (hitl-plan-op-spec (:constructor hitl-plan-op-spec--make)
                                  (:copier nil))
   "Registered operation specification."
   domain name key label read-args apply describe from-json schema validate
-  queueable order-last extra)
+  queueable order-last extra resume)
 
 (cl-defstruct (hitl-plan-domain (:constructor hitl-plan-domain--make)
                                 (:predicate hitl-plan-domain-struct-p)
@@ -204,6 +207,14 @@ explicit ID that is already cached or saved in its target directory.")
 
 (defvar hitl-plan-batch-buffer nil
   "Buffer returned by the domain's batch rebuild during a :driver call.")
+
+(defvar hitl-plan--active-plans nil
+  "Dynamically bound list of (ID . DIRECTORY) keys currently executing.")
+
+(defun hitl-plan--active-p (plan)
+  "Return non-nil when PLAN's ID and store are executing in this Emacs."
+  (member (cons (hitl-plan-id plan) (hitl-plan--directory plan))
+          hitl-plan--active-plans))
 
 ;;; Trust Origin
 
@@ -311,7 +322,7 @@ DOMAIN is a name (symbol or string) or a `hitl-plan-domain'.  The domain's
 
 (cl-defun hitl-plan-register-op
     (domain name &key key label queueable read-args validate apply describe
-            from-json schema order-last extra)
+            from-json schema order-last extra resume)
   "Register operation NAME under DOMAIN (a symbol, or t for any domain).
 KEY is an optional character that must be unique within DOMAIN.  APPLY is
 called with the operation's args; READ-ARGS interactively returns an arg
@@ -320,7 +331,9 @@ DESCRIBE receives the args and returns a string; FROM-JSON maps a JSON
 alist to an arg list; SCHEMA documents arguments; QUEUEABLE marks
 operations safe to run without prompting; ORDER-LAST runs the operation
 after all others; EXTRA is an arbitrary plist of domain metadata, read
-with `hitl-plan-op-spec-extra'.  Returns the `hitl-plan-op-spec'."
+with `hitl-plan-op-spec-extra'.  RESUME receives a saved response followed
+by the operation's args when a suspended ordered step resumes; APPLY is
+not called again.  Returns the `hitl-plan-op-spec'."
   (declare (indent 2))
   (unless (and domain (symbolp domain))
     (user-error "Domain must be a symbol: %S" domain))
@@ -338,7 +351,7 @@ with `hitl-plan-op-spec-extra'.  Returns the `hitl-plan-op-spec'."
             :label (or label (symbol-name name))
             :read-args read-args :apply apply :describe describe
             :from-json from-json :schema schema :validate validate
-            :queueable queueable :order-last order-last :extra extra)
+            :queueable queueable :order-last order-last :extra extra :resume resume)
            hitl-plan--op-registry))
 
 (defun hitl-plan--domain-specs (domain)
@@ -535,6 +548,7 @@ the file would not load back."
           :created (hitl-plan-created plan)
           :updated (hitl-plan-updated plan)
           :status (hitl-plan-status plan)
+          :execution (hitl-plan-execution plan)
           :scope (hitl-plan-scope plan)
           :log-notes (hitl-plan-log-notes plan)
           :note (hitl-plan-note plan)
@@ -551,6 +565,9 @@ the file would not load back."
                                                       (hitl-plan-id plan)))
                                  :status (hitl-plan-step-status step)
                                  :message (hitl-plan-step-message step)
+                                 :request (hitl-plan-step-request step)
+                                 :response (hitl-plan-step-response step)
+                                 :history (hitl-plan-step-history step)
                                  :note (hitl-plan-step-note step)))
                          (hitl-plan-steps plan)))))
 
@@ -592,6 +609,9 @@ whose :op-index is missing or out of range."
                              :op (nth idx ops)
                              :status (or (plist-get pl :status) 'pending)
                              :message (plist-get pl :message)
+                             :request (plist-get pl :request)
+                             :response (plist-get pl :response)
+                             :history (plist-get pl :history)
                              :note (plist-get pl :note))))
                         raw-steps)))
     (hitl-plan--make
@@ -604,6 +624,7 @@ whose :op-index is missing or out of range."
      :created (plist-get data :created)
      :updated (plist-get data :updated)
      :status (or (plist-get data :status) 'draft)
+     :execution (or (plist-get data :execution) 'bulk)
      :scope (plist-get data :scope)
      :log-notes (or (plist-get data :log-notes) 'ignore)
      :note (plist-get data :note)
@@ -619,6 +640,7 @@ whose :op-index is missing or out of range."
          (file (hitl-plan-file id dir))
          (print-length nil)
          (print-level nil)
+         (print-circle t)
          temp)
     (make-directory dir t)
     (setf (hitl-plan-updated plan) (hitl-plan--now))
@@ -666,6 +688,9 @@ corrupt; never signals."
                   (dir (file-name-directory file)))
               (unless (equal (file-name-as-directory dir) (hitl-plan--directory))
                 (setf (hitl-plan-directory plan) dir))
+              (when (and (eq (hitl-plan-status plan) 'running)
+                         (not (hitl-plan--active-p plan)))
+                (setf (hitl-plan-status plan) 'paused))
               (puthash (hitl-plan-id plan) plan hitl-plan--store)
               plan))
         (error
@@ -770,7 +795,7 @@ Saved plans are looked for in DIRECTORY (default `hitl-plan-directory')."
 (cl-defun hitl-plan-create
     (&key (domain 'file-target) scope targets ops description
           (log-notes hitl-plan-log-notes) note (status 'draft) directory
-          metadata (save t) id)
+          metadata (save t) id (execution 'bulk))
   "Create a `hitl-plan' of OPS crossed with TARGETS in DOMAIN.
 SCOPE, DESCRIPTION, LOG-NOTES, NOTE, STATUS and METADATA populate the
 plan.  OPS entries may be `hitl-plan-op's, (NAME . ARGS), or symbols.  Steps are
@@ -781,7 +806,11 @@ generated plan ID; it is a `user-error' if a plan with that ID is already
 cached or saved in the target directory (see `hitl-plan--store').  The
 domain's :after-steps-added function is called with the plan and all
 created steps (when any) after the steps are built and before the first
-save."
+save.  EXECUTION is `bulk' (operation order, using domain drivers) or
+`steps' (strict step order, pausing at failures and suspended steps).
+Ordered execution does not use the domain's batch driver."
+  (unless (memq execution '(bulk steps))
+    (user-error "Unknown plan execution mode: %S" execution))
   (unless (hitl-plan-get-domain domain)
     (user-error "Unknown hitl-plan domain: %S" domain))
   (when (and id (or (gethash id hitl-plan--store)
@@ -791,7 +820,10 @@ save."
                                           (or directory (hitl-plan-domain-store domain)
                                               hitl-plan-directory)))))))
     (user-error "Plan %s already exists" id))
-  (let* ((norm-ops (hitl-plan-order-ops domain (mapcar #'hitl-plan--normalize-op ops)))
+  (let* ((norm-ops (seq-map #'hitl-plan--normalize-op ops))
+         (norm-ops (if (eq execution 'steps)
+                       norm-ops
+                     (hitl-plan-order-ops domain norm-ops)))
          (step-id 0)
          (steps (seq-mapcat
                  (lambda (op)
@@ -807,7 +839,7 @@ save."
                 :scope scope :ops norm-ops :log-notes log-notes :note note
                 :steps steps :status status
                 :directory (or directory (hitl-plan-domain-store domain))
-                :metadata metadata)))
+                :metadata metadata :execution execution)))
     (when-let* ((hook (hitl-plan-domain-after-steps-added
                        (hitl-plan-get-domain domain)))
                 (steps steps))
@@ -821,32 +853,47 @@ save."
 Re-orders operations (`:order-last' last), reopens a complete plan if new
 steps are pending, saves, and returns PLAN.  The domain's
 :after-steps-added function is called with PLAN and only the new steps
-\(when any) after they are appended and before the save."
-  (let* ((op (hitl-plan--normalize-op op))
-         (targets (or targets
-                      (seq-uniq (mapcar #'hitl-plan-step-target (hitl-plan-steps plan))
-                                #'equal)))
-         (max-id (apply #'max 0 (mapcar #'hitl-plan-step-id (hitl-plan-steps plan))))
-         (new-steps (mapcar (lambda (target)
-                              (hitl-plan--make-step (cl-incf max-id) target op))
-                            targets))
-         (all-ops (hitl-plan-order-ops (hitl-plan-domain plan)
-                                       (append (hitl-plan-ops plan) (list op))))
-         (all-steps (append (hitl-plan-steps plan) new-steps)))
-    (setf (hitl-plan-ops plan) all-ops)
-    (setf (hitl-plan-steps plan)
-          (seq-mapcat (lambda (o)
-                        (seq-filter (lambda (s) (eq (hitl-plan-step-op s) o)) all-steps))
-                      all-ops))
-    (when-let* ((new-steps new-steps)
-                (hook (hitl-plan-domain-after-steps-added
-                       (hitl-plan-get-domain (hitl-plan-domain plan)))))
-      (funcall hook plan new-steps))
-    (when (and (eq (hitl-plan-status plan) 'complete)
-               (seq-some (lambda (s) (eq (hitl-plan-step-status s) 'pending))
-                         new-steps))
-      (setf (hitl-plan-status plan) 'paused))
-    (hitl-plan-save plan)))
+\(when any) after they are appended and before the save.  Ordered plans
+append through `hitl-plan-insert-steps', preserving existing step order."
+  (if (eq (hitl-plan-execution plan) 'steps)
+      (progn
+        (hitl-plan-insert-steps
+         plan nil
+         (seq-map (lambda (target) (list :op op :target target))
+                  (or targets
+                      (seq-uniq (seq-map #'hitl-plan-step-target
+                                        (hitl-plan-steps plan)) #'equal))))
+        plan)
+    (let* ((op (hitl-plan--normalize-op op))
+           (targets (or targets
+                        (seq-uniq (seq-map #'hitl-plan-step-target
+                                           (hitl-plan-steps plan)) #'equal)))
+           (max-id (seq-reduce (lambda (value step)
+                                (max value (hitl-plan-step-id step)))
+                              (hitl-plan-steps plan) 0))
+           (new-steps (seq-map (lambda (target)
+                                 (setq max-id (1+ max-id))
+                                 (hitl-plan--make-step max-id target op))
+                               targets))
+           (all-ops (hitl-plan-order-ops (hitl-plan-domain plan)
+                                         (append (hitl-plan-ops plan) (list op))))
+           (all-steps (append (hitl-plan-steps plan) new-steps)))
+      (setf (hitl-plan-ops plan) all-ops)
+      (setf (hitl-plan-steps plan)
+            (seq-mapcat
+             (lambda (operation)
+               (seq-filter (lambda (step) (eq (hitl-plan-step-op step) operation))
+                           all-steps))
+             all-ops))
+      (when-let* ((new-steps new-steps)
+                  (hook (hitl-plan-domain-after-steps-added
+                         (hitl-plan-get-domain (hitl-plan-domain plan)))))
+        (funcall hook plan new-steps))
+      (when (and (eq (hitl-plan-status plan) 'complete)
+                 (seq-some (lambda (step) (eq (hitl-plan-step-status step) 'pending))
+                           new-steps))
+        (setf (hitl-plan-status plan) 'paused))
+      (hitl-plan-save plan))))
 
 (defun hitl-plan-reset (plan &optional statuses)
   "Reset PLAN steps to pending and save, returning PLAN.
@@ -863,7 +910,10 @@ Running and discarded plans cannot be reset.  Agent approval is revoked."
     (when steps
       (seq-do (lambda (step)
                 (setf (hitl-plan-step-status step) 'pending
-                      (hitl-plan-step-message step) nil))
+                      (hitl-plan-step-message step) nil
+                      (hitl-plan-step-request step) nil
+                      (hitl-plan-step-response step) nil)
+                (hitl-plan--record-event plan step 'reset))
               steps)
       (setf (hitl-plan-status plan) 'draft
             (hitl-plan-metadata plan)
@@ -925,6 +975,184 @@ target's :directory or the parent directory of its :file."
 
 ;;; Execution
 
+(define-error 'hitl-plan-suspension "Plan step suspended")
+
+(defun hitl-plan--flow-step (plan step-id)
+  "Validate ordered PLAN and return its step identified by STEP-ID."
+  (unless (and (hitl-plan-p plan) (eq (hitl-plan-execution plan) 'steps))
+    (user-error "This operation requires an ordered plan"))
+  (when (eq (hitl-plan-status plan) 'discarded)
+    (user-error "Plan %s is discarded" (hitl-plan-id plan)))
+  (when (and (hitl-plan--active-p plan)
+             (not (eq plan hitl-plan-current-plan)))
+    (user-error "Plan %s is running" (hitl-plan-id plan)))
+  (or (seq-find (lambda (step) (equal (hitl-plan-step-id step) step-id))
+                (hitl-plan-steps plan))
+      (user-error "Unknown step %S in plan %s" step-id (hitl-plan-id plan))))
+
+(defun hitl-plan--record-event (plan step event &optional phase)
+  "Append an EVENT snapshot for PHASE to ordered PLAN's STEP history."
+  (when (eq (hitl-plan-execution plan) 'steps)
+    (setf (hitl-plan-step-history step)
+          (append (hitl-plan-step-history step)
+                  (list (list :event event :time (hitl-plan--now) :phase phase
+                              :request (hitl-plan--check-data
+                                        (hitl-plan-step-request step))
+                              :response (hitl-plan--check-data
+                                         (hitl-plan-step-response step))
+                              :message (hitl-plan-step-message step)))))))
+
+(defun hitl-plan--save-transition (plan)
+  "Save PLAN unless its executing handler will save the transition.
+Mutations within a handler are saved together with its resulting status."
+  (unless (eq plan hitl-plan-current-plan)
+    (hitl-plan-save plan))
+  plan)
+
+(defun hitl-plan--check-data (value)
+  "Return a readable copy of VALUE, rejecting unsavable suspension data."
+  (condition-case nil
+      (let ((print-circle t)
+            (print-length nil)
+            (print-level nil))
+        (read (prin1-to-string value)))
+    (error (user-error "Plan suspension data must be readable Lisp data"))))
+
+(defun hitl-plan-suspend (request)
+  "Suspend the current ordered step with data-only REQUEST.
+Call from an operation's APPLY or RESUME function.  This does not return.
+REQUEST describes a confirmation, choice, external task, or other event.
+The executor saves it and stops before the next step.  Resolve the wait
+with `hitl-plan-resolve-step'; a later execution calls the operation's
+registered RESUME function, never APPLY.  Handlers must be registered
+again after restarting Emacs; no executable code is saved in the plan."
+  (unless (and hitl-plan-current-plan hitl-plan-current-step
+               (eq (hitl-plan-execution hitl-plan-current-plan) 'steps))
+    (user-error "Only an executing ordered step can suspend"))
+  (unless (hitl-plan-op-spec-resume
+           (hitl-plan-get-op (hitl-plan-domain hitl-plan-current-plan)
+                             (hitl-plan-op-name hitl-plan-current-op)))
+    (user-error "Operation %s has no resume handler"
+                (hitl-plan-op-name hitl-plan-current-op)))
+  (hitl-plan--check-data request)
+  (signal 'hitl-plan-suspension (list request)))
+
+(defun hitl-plan-resolve-step (plan step-id response)
+  "Record RESPONSE for waiting STEP-ID of ordered PLAN and save PLAN.
+The step becomes `ready'.  No handler or subsequent work is executed.
+A nil RESPONSE is a valid answer; resolving a step twice is an error."
+  (let ((step (hitl-plan--flow-step plan step-id)))
+    (unless (eq (hitl-plan-step-status step) 'waiting)
+      (user-error "Step %s is not waiting" step-id))
+    (hitl-plan--check-data response)
+    (setf (hitl-plan-step-response step) response
+          (hitl-plan-step-status step) 'ready)
+    (hitl-plan--record-event plan step 'resolved)
+    (hitl-plan--save-transition plan)))
+
+(defun hitl-plan-insert-steps (plan before steps)
+  "Insert STEPS before step ID BEFORE in ordered PLAN, then save PLAN.
+Nil BEFORE appends.  Each entry is a plist with :op (accepted by
+`hitl-plan-create') and :target.  Return the newly created step objects.
+IDs are fresh and stable; execution follows the resulting step order,
+including insertions made by running handlers.  Domain batch drivers and
+:order-last do not reorder these steps.  Completed plans reopen paused.
+The domain's :after-steps-added callback runs for the new steps.
+Restricted callers may not mutate the executable structure of a plan."
+  (unless (and (hitl-plan-p plan) (eq (hitl-plan-execution plan) 'steps))
+    (user-error "Insertion requires an ordered plan"))
+  (when (or (hitl-plan-restricted-p) (hitl-plan-origin-mcp-p plan))
+    (user-error "Restricted plans cannot insert executable steps"))
+  (when (or (eq (hitl-plan-status plan) 'discarded)
+            (and (hitl-plan--active-p plan)
+                 (not (eq plan hitl-plan-current-plan))))
+    (user-error "Cannot insert into a %s plan" (hitl-plan-status plan)))
+  (unless (proper-list-p steps)
+    (user-error "Steps must be a list"))
+  (let* ((anchor (and before (hitl-plan--flow-step plan before)))
+         (max-id (seq-reduce (lambda (value step)
+                              (max value (hitl-plan-step-id step)))
+                            (hitl-plan-steps plan) 0))
+         (new-steps
+          (seq-map
+           (lambda (entry)
+             (unless (and (plistp entry) (plist-member entry :target)
+                          (plist-get entry :op))
+               (user-error "Step needs :target and :op: %S" entry))
+             (let ((op (hitl-plan--normalize-op (plist-get entry :op))))
+               (unless (hitl-plan-get-op (hitl-plan-domain plan)
+                                         (hitl-plan-op-name op))
+                 (user-error "Unknown operation: %s" (hitl-plan-op-name op)))
+               (setq max-id (1+ max-id))
+               (hitl-plan--make-step max-id (plist-get entry :target) op)))
+           steps))
+         (position (if anchor
+                       (seq-position (hitl-plan-steps plan) anchor #'eq)
+                     (length (hitl-plan-steps plan)))))
+    (when new-steps
+      (setf (hitl-plan-steps plan)
+            (append (seq-take (hitl-plan-steps plan) position) new-steps
+                    (nthcdr position (hitl-plan-steps plan)))
+            (hitl-plan-ops plan)
+            (seq-uniq (append (hitl-plan-ops plan)
+                              (seq-map #'hitl-plan-step-op new-steps)) #'eq)
+            (hitl-plan-metadata plan)
+            (plist-put (hitl-plan-metadata plan) :approved nil))
+      (when (eq (hitl-plan-status plan) 'complete)
+        (setf (hitl-plan-status plan) 'paused))
+      (when-let* ((callback (hitl-plan-domain-after-steps-added
+                            (hitl-plan-get-domain (hitl-plan-domain plan)))))
+        (funcall callback plan new-steps))
+      (hitl-plan--save-transition plan))
+    new-steps))
+
+(defun hitl-plan-retry-step (plan step-id)
+  "Retry failed STEP-ID of ordered PLAN, retaining its failure history.
+A failed RESUME handler retries RESUME with its saved response, rather
+than repeating APPLY.  The domain's unresolved status is also retryable.
+Domain-specific :after-reset state is cleared."
+  (let ((step (hitl-plan--flow-step plan step-id)))
+    (unless (memq (hitl-plan-step-status step)
+                  (list 'failed
+                        (or (hitl-plan-domain-unresolved-status
+                             (hitl-plan-get-domain (hitl-plan-domain plan)))
+                            'failed)))
+      (user-error "Step %s has not failed" step-id))
+    (setf (hitl-plan-step-status step)
+          (if (eq (plist-get (car (last (hitl-plan-step-history step)))
+                              :phase) 'resume)
+              'ready
+            'pending)
+          (hitl-plan-step-message step) nil)
+    (hitl-plan--record-event plan step 'retry)
+    (when-let* ((callback (hitl-plan-domain-after-reset
+                          (hitl-plan-get-domain (hitl-plan-domain plan)))))
+      (funcall callback plan (list step)))
+    (hitl-plan--save-transition plan)))
+
+(defun hitl-plan-skip-step (plan step-id &optional message)
+  "Skip unfinished STEP-ID in ordered PLAN with optional MESSAGE.
+Use this in a resume handler to deselect a branch.  Completed steps and
+the step currently applying cannot be skipped.  History is retained."
+  (let ((step (hitl-plan--flow-step plan step-id)))
+    (when (or (memq (hitl-plan-step-status step) '(done skipped))
+              (eq step hitl-plan-current-step))
+      (user-error "Cannot skip step %s" step-id))
+    (setf (hitl-plan-step-status step) 'skipped
+          (hitl-plan-step-message step) message)
+    (hitl-plan--record-event plan step 'skipped)
+    (hitl-plan--save-transition plan)))
+
+(defun hitl-plan-pause (plan)
+  "Pause ordered PLAN after the current handler returns normally.
+Unlike `hitl-plan-suspend', the current step completes.  A later explicit
+execution continues at the next unfinished step."
+  (unless (and (eq plan hitl-plan-current-plan)
+               (eq (hitl-plan-execution plan) 'steps))
+    (user-error "Only the executing ordered plan can pause"))
+  (setf (hitl-plan-status plan) 'paused)
+  plan)
+
 (defun hitl-plan--unresolved (plan step)
   "Mark STEP of PLAN unresolvable using the domain's status and message."
   (let* ((domain (hitl-plan-get-domain (hitl-plan-domain plan)))
@@ -963,14 +1191,18 @@ target's :directory or the parent directory of its :file."
       (error nil))))
 
 (defun hitl-plan-run-step (plan step op &optional resolved)
-  "Run pending STEP of PLAN under OP, quit-safely, and save PLAN.
+  "Run pending or ready STEP of PLAN under OP, quit-safely, and save PLAN.
 RESOLVED is the already-resolved target; when nil the domain resolves it.
 Domain drivers call this for each target.  On success STEP becomes `done'
 and `hitl-plan-step-functions' runs; errors mark it `failed'.  If \\[keyboard-quit]
 interrupts the application the step stays `pending' and `quit-flag' is left
 set for the caller.  Returns the step's resulting status, or nil when STEP
-was not pending."
-  (when (eq (hitl-plan-step-status step) 'pending)
+was not runnable.  A ready ordered step calls RESUME with its response
+and the operation's args.  Suspension saves a `waiting' step.  Quitting
+a ready step leaves it ready, so only RESUME is repeated."
+  (when (or (eq (hitl-plan-step-status step) 'pending)
+            (and (eq (hitl-plan-execution plan) 'steps)
+                 (eq (hitl-plan-step-status step) 'ready)))
     (let* ((dom-name (hitl-plan-domain plan))
            (domain (hitl-plan-get-domain dom-name))
            (spec (hitl-plan-get-op dom-name (hitl-plan-op-name op)))
@@ -980,6 +1212,7 @@ was not pending."
            (hitl-plan-current-step step)
            (hitl-plan-current-op op)
            (hitl-plan-current-target resolved)
+           (resuming (eq (hitl-plan-step-status step) 'ready))
            (inhibit-quit t)
            (completed nil))
       (cond
@@ -998,7 +1231,14 @@ was not pending."
                      (when-let* ((validate (hitl-plan-op-spec-validate spec))
                                  (problem (apply validate args)))
                        (error "%s" problem))
-                     (apply (hitl-plan-op-spec-apply spec) args)
+                     (if resuming
+                         (progn
+                           (unless (hitl-plan-op-spec-resume spec)
+                             (error "Operation %s has no resume handler"
+                                    (hitl-plan-op-name op)))
+                           (apply (hitl-plan-op-spec-resume spec)
+                                  (hitl-plan-step-response step) args))
+                       (apply (hitl-plan-op-spec-apply spec) args))
                      (when-let* ((inject (and domain (hitl-plan-domain-inject-note domain)))
                                  (text (pcase (hitl-plan-log-notes plan)
                                          ('one (hitl-plan-note plan))
@@ -1017,7 +1257,15 @@ was not pending."
                   (error
                    (setf (hitl-plan-step-message step)
                          (format "step hook error: %s" (error-message-string herr)))))))
+          (hitl-plan-suspension
+           (setf (hitl-plan-step-status step) 'waiting
+                 (hitl-plan-step-request step) (cadr err)
+                 (hitl-plan-step-response step) nil
+                 (hitl-plan-step-message step) nil))
           (error (hitl-plan--fail step (error-message-string err))))))
+      (unless (memq (hitl-plan-step-status step) '(pending ready))
+        (hitl-plan--record-event plan step (hitl-plan-step-status step)
+                                 (if resuming 'resume 'apply)))
       (when (and ours (markerp resolved))
         (set-marker resolved nil))
       (hitl-plan-save plan)
@@ -1112,6 +1360,29 @@ inside the batch rebuild propagates to `hitl-plan-execute'."
               (setq quit-flag nil quitted t))))
         quitted))))
 
+(defun hitl-plan--run-ordered (plan limit)
+  "Run PLAN in step order, stopping at a blocker or after LIMIT attempts.
+Return non-nil on quit.  Rescan after each step to honor inserted work."
+  (let ((attempted 0)
+        (quitted nil)
+        (inhibit-quit t)
+        step)
+    (while (and (eq (hitl-plan-status plan) 'running)
+                (or (null limit) (< attempted limit))
+                (setq step (seq-find
+                            (lambda (candidate)
+                              (not (memq (hitl-plan-step-status candidate)
+                                         '(done skipped))))
+                            (hitl-plan-steps plan)))
+                (memq (hitl-plan-step-status step) '(pending ready))
+                (not quitted))
+      (hitl-plan-run-step plan step (hitl-plan-step-op step))
+      (setq attempted (1+ attempted))
+      (when quit-flag
+        (setq quit-flag nil)
+        (setq quitted t)))
+    quitted))
+
 (defun hitl-plan-execute (plan &optional only-op limit)
   "Execute pending steps of PLAN (or only those of ONLY-OP), return PLAN.
 When LIMIT is a positive integer, stop once that many pending steps have
@@ -1127,11 +1398,24 @@ cleanly; call again to resume.  Unresolvable steps are marked failed.  Runs
 `hitl-plan-after-apply-functions' afterwards, except when a driver or
 batch rebuild signals an error or a quit escapes the rebuild: the plan is
 then paused and saved, the condition is re-signalled, and the hooks do
-not run."
+not run.  For ordered plans (`steps' execution), LIMIT counts apply or
+resume attempts; failures and waits block subsequent steps.  ONLY-OP is
+not supported, since it could bypass a gate.  Domain drivers are unused."
+  (unless (memq (hitl-plan-execution plan) '(bulk steps))
+    (user-error "Unknown plan execution mode: %S" (hitl-plan-execution plan)))
+  (when (and limit (not (and (integerp limit) (> limit 0))))
+    (user-error "Execution limit must be a positive integer"))
+  (when (and only-op (eq (hitl-plan-execution plan) 'steps))
+    (user-error "Cannot filter operations in an ordered plan"))
+  (when (hitl-plan--active-p plan)
+    (user-error "Plan %s is already running" (hitl-plan-id plan)))
   (pcase (hitl-plan-status plan)
     ('discarded (user-error "Plan %s is discarded" (hitl-plan-id plan)))
     ('complete (user-error "Plan %s is already complete" (hitl-plan-id plan))))
-  (let* ((hitl-plan-restricted (or hitl-plan-restricted (hitl-plan-origin-mcp-p plan)))
+  (let* ((hitl-plan--active-plans
+          (cons (cons (hitl-plan-id plan) (hitl-plan--directory plan))
+                hitl-plan--active-plans))
+         (hitl-plan-restricted (or hitl-plan-restricted (hitl-plan-origin-mcp-p plan)))
          (domain (hitl-plan-get-domain (hitl-plan-domain plan)))
          (before-done (seq-filter (lambda (s) (eq (hitl-plan-step-status s) 'done))
                                   (hitl-plan-steps plan)))
@@ -1150,11 +1434,15 @@ not run."
     ;; (quits inside a driver are handled by `hitl-plan--run-op'), must not
     ;; leave the plan `running' on disk: pause it, save, and re-signal.
     (condition-case err
-        (dolist (op ops)
-          (let ((remaining (and limit
-                                (- limit (- pending-before (funcall pending-count))))))
-            (unless (or quitted (and remaining (<= remaining 0)))
-              (setq quitted (hitl-plan--run-op plan op domain remaining)))))
+        (if (eq (hitl-plan-execution plan) 'steps)
+            (setq quitted (hitl-plan--run-ordered plan limit))
+          (seq-do
+           (lambda (op)
+             (let ((remaining (and limit
+                                   (- limit (- pending-before (funcall pending-count))))))
+               (unless (or quitted (and remaining (<= remaining 0)))
+                 (setq quitted (hitl-plan--run-op plan op domain remaining)))))
+           ops))
       ((error quit)
        (let ((inhibit-quit t))
          (setf (hitl-plan-status plan) 'paused)
@@ -1164,10 +1452,15 @@ not run."
       (setf (hitl-plan-status plan) 'paused)
       (hitl-plan-save plan))
     (hitl-plan--run-after-apply plan before-done)
-    (unless quitted
+    (unless (or quitted (eq (hitl-plan-status plan) 'discarded))
       (setf (hitl-plan-status plan)
-            (if (seq-some (lambda (s) (eq (hitl-plan-step-status s) 'pending))
-                          (hitl-plan-steps plan))
+            (if (or (eq (hitl-plan-status plan) 'paused)
+                    (seq-some
+                     (lambda (step)
+                       (if (eq (hitl-plan-execution plan) 'steps)
+                           (not (memq (hitl-plan-step-status step) '(done skipped)))
+                         (eq (hitl-plan-step-status step) 'pending)))
+                     (hitl-plan-steps plan)))
                 'paused
               'complete))
       (hitl-plan-save plan))
@@ -1178,7 +1471,7 @@ not run."
 Returns PLAN.  Signals `user-error' when no step is pending.  Saved state
 is the ordinary paused state, so `hitl-plan-execute' or another call
 continues where this one stopped."
-  (unless (seq-some (lambda (s) (eq (hitl-plan-step-status s) 'pending))
+  (unless (seq-some (lambda (s) (memq (hitl-plan-step-status s) '(pending ready)))
                     (hitl-plan-steps plan))
     (user-error "Plan %s has no pending step" (hitl-plan-id plan)))
   (hitl-plan-execute plan nil 1))
@@ -1214,6 +1507,7 @@ present (as a keyword) to its count, so the counts always sum to :total."
                                         steps))))
     (list :plan_id (hitl-plan-id plan)
           :domain (symbol-name dom-name)
+          :execution (symbol-name (hitl-plan-execution plan))
           :description (or (hitl-plan-description plan) :null)
           :created (or (hitl-plan-created plan) :null)
           :updated (or (hitl-plan-updated plan) :null)
